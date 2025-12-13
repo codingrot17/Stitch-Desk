@@ -1,4 +1,4 @@
-// src/services/syncManager.js
+// src/services/syncManager.js - Fixed version
 import {
     databases,
     isOnline,
@@ -6,14 +6,6 @@ import {
     DATABASE_ID
 } from "./appwrite";
 import { useToast } from "./toast";
-
-/**
- * Hybrid Storage Manager
- * - Uses localStorage as primary storage (instant access)
- * - Syncs with Appwrite when online
- * - Queues changes when offline
- * - Auto-syncs when connection restored
- */
 
 const SYNC_QUEUE_KEY = "sync_queue";
 const LAST_SYNC_KEY = "last_sync_timestamp";
@@ -24,7 +16,6 @@ class SyncManager {
         this.setupOnlineListener();
     }
 
-    // Setup online/offline listener
     setupOnlineListener() {
         window.addEventListener("online", () => {
             console.log("📡 Back online - starting sync...");
@@ -38,13 +29,11 @@ class SyncManager {
         });
     }
 
-    // Get sync queue from localStorage
     getSyncQueue() {
         const queue = localStorage.getItem(SYNC_QUEUE_KEY);
         return queue ? JSON.parse(queue) : [];
     }
 
-    // Add operation to sync queue
     addToQueue(operation) {
         const queue = this.getSyncQueue();
         queue.push({
@@ -55,17 +44,14 @@ class SyncManager {
         localStorage.setItem(SYNC_QUEUE_KEY, JSON.stringify(queue));
     }
 
-    // Clear sync queue
     clearQueue() {
         localStorage.removeItem(SYNC_QUEUE_KEY);
     }
 
-    // Get last sync timestamp
     getLastSync() {
         return localStorage.getItem(LAST_SYNC_KEY);
     }
 
-    // Update last sync timestamp
     updateLastSync() {
         localStorage.setItem(LAST_SYNC_KEY, new Date().toISOString());
     }
@@ -74,21 +60,19 @@ class SyncManager {
      * CREATE operation with hybrid storage
      */
     async create(collection, data, localStorageKey) {
-        // 1. Save to localStorage immediately (instant UX)
         const localData = JSON.parse(
             localStorage.getItem(localStorageKey) || "[]"
         );
         const newItem = {
             id: Date.now().toString(),
             ...data,
-            _localOnly: true, // Flag for items not yet synced
+            _localOnly: true,
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString()
         };
         localData.push(newItem);
         localStorage.setItem(localStorageKey, JSON.stringify(localData));
 
-        // 2. Try to sync to Appwrite if online
         if (isOnline()) {
             try {
                 const response = await databases.createDocument(
@@ -97,8 +81,8 @@ class SyncManager {
                     "unique()",
                     {
                         ...data,
-                        createdAt: newItem.createdAt,
-                        updatedAt: newItem.updatedAt
+                        $createdAt: newItem.createdAt,
+                        $updatedAt: newItem.updatedAt
                     }
                 );
 
@@ -117,7 +101,6 @@ class SyncManager {
             } catch (error) {
                 console.error("Sync failed, queuing for later:", error);
 
-                // Add to sync queue for later
                 this.addToQueue({
                     operation: "create",
                     collection,
@@ -130,7 +113,6 @@ class SyncManager {
                 return newItem;
             }
         } else {
-            // Offline - queue for sync
             this.addToQueue({
                 operation: "create",
                 collection,
@@ -144,6 +126,7 @@ class SyncManager {
 
     /**
      * UPDATE operation with hybrid storage
+     * FIX: Check if item has valid Appwrite ID before syncing
      */
     async update(collection, docId, updates, localStorageKey) {
         // 1. Update localStorage immediately
@@ -157,16 +140,38 @@ class SyncManager {
         );
         localStorage.setItem(localStorageKey, JSON.stringify(updatedData));
 
-        // 2. Try to sync to Appwrite if online
+        // Get the updated item to check if it has a valid Appwrite ID
+        const updatedItem = updatedData.find(item => item.id === docId);
+
+        // Check if item exists and has valid Appwrite ID
+        if (!updatedItem) {
+            console.error("Item not found in localStorage:", docId);
+            return null;
+        }
+
+        // Check if this is a local-only item (not yet synced to Appwrite)
+        if (updatedItem._localOnly || !docId || docId.length < 10) {
+            console.log("Item not yet synced to Appwrite, queueing update...");
+            this.addToQueue({
+                operation: "update",
+                collection,
+                docId,
+                data: updates,
+                localStorageKey
+            });
+            return updatedItem;
+        }
+
+        // 2. Try to sync to Appwrite if online and item has valid ID
         if (isOnline()) {
             try {
                 const response = await databases.updateDocument(
                     DATABASE_ID,
                     collection,
-                    docId,
+                    docId, // Use the actual Appwrite document ID
                     {
                         ...updates,
-                        updatedAt: new Date().toISOString()
+                        $updatedAt: new Date().toISOString()
                     }
                 );
                 return response;
@@ -182,10 +187,9 @@ class SyncManager {
                 });
 
                 useToast().warning("Updated locally - will sync when online");
-                return updatedData.find(item => item.id === docId);
+                return updatedItem;
             }
         } else {
-            // Offline - queue for sync
             this.addToQueue({
                 operation: "update",
                 collection,
@@ -193,22 +197,37 @@ class SyncManager {
                 data: updates,
                 localStorageKey
             });
-            return updatedData.find(item => item.id === docId);
+            return updatedItem;
         }
     }
 
     /**
      * DELETE operation with hybrid storage
+     * FIX: Check if item has valid Appwrite ID before syncing
      */
     async delete(collection, docId, localStorageKey) {
-        // 1. Delete from localStorage immediately
+        // 1. Get item before deleting to check if it's synced
         const localData = JSON.parse(
             localStorage.getItem(localStorageKey) || "[]"
         );
+        const itemToDelete = localData.find(item => item.id === docId);
+
+        // 2. Delete from localStorage immediately
         const filteredData = localData.filter(item => item.id !== docId);
         localStorage.setItem(localStorageKey, JSON.stringify(filteredData));
 
-        // 2. Try to sync to Appwrite if online
+        // Check if item was synced to Appwrite (has valid ID and not _localOnly)
+        if (
+            !itemToDelete ||
+            itemToDelete._localOnly ||
+            !docId ||
+            docId.length < 10
+        ) {
+            console.log("Item was local-only, no need to sync deletion");
+            return true;
+        }
+
+        // 3. Try to sync to Appwrite if online and item was synced
         if (isOnline()) {
             try {
                 await databases.deleteDocument(DATABASE_ID, collection, docId);
@@ -227,7 +246,6 @@ class SyncManager {
                 return true;
             }
         } else {
-            // Offline - queue for sync
             this.addToQueue({
                 operation: "delete",
                 collection,
@@ -243,7 +261,6 @@ class SyncManager {
      */
     async fetch(collection, localStorageKey) {
         if (!isOnline()) {
-            // Return local data when offline
             return JSON.parse(localStorage.getItem(localStorageKey) || "[]");
         }
 
@@ -258,16 +275,23 @@ class SyncManager {
                 _localOnly: false
             }));
 
-            // Update localStorage with server data
-            localStorage.setItem(localStorageKey, JSON.stringify(items));
+            // Merge with local-only items (items not yet synced)
+            const localData = JSON.parse(
+                localStorage.getItem(localStorageKey) || "[]"
+            );
+            const localOnlyItems = localData.filter(item => item._localOnly);
+
+            // Combine: Appwrite items + local-only items
+            const mergedItems = [...items, ...localOnlyItems];
+
+            localStorage.setItem(localStorageKey, JSON.stringify(mergedItems));
             this.updateLastSync();
 
-            return items;
+            return mergedItems;
         } catch (error) {
             console.error("Fetch failed, using local data:", error);
             useToast().error("Could not fetch latest data");
 
-            // Fallback to local data
             return JSON.parse(localStorage.getItem(localStorageKey) || "[]");
         }
     }
@@ -292,12 +316,21 @@ class SyncManager {
 
         for (const op of queue) {
             try {
+                // Skip operations with invalid IDs
+                if (
+                    op.operation !== "create" &&
+                    (!op.docId || op.docId.length < 10)
+                ) {
+                    console.log("Skipping operation with invalid ID:", op);
+                    continue;
+                }
+
                 switch (op.operation) {
                     case "create":
                         await databases.createDocument(
                             DATABASE_ID,
                             op.collection,
-                            op.docId,
+                            "unique()",
                             op.data
                         );
                         break;
@@ -327,7 +360,6 @@ class SyncManager {
             }
         }
 
-        // Update queue with only failed operations
         if (failedOps.length > 0) {
             localStorage.setItem(SYNC_QUEUE_KEY, JSON.stringify(failedOps));
             useToast().warning(
@@ -342,9 +374,6 @@ class SyncManager {
         this.updateLastSync();
     }
 
-    /**
-     * Manual sync trigger
-     */
     async syncNow() {
         if (!isOnline()) {
             useToast().error("Cannot sync - you are offline");
@@ -356,9 +385,6 @@ class SyncManager {
         return true;
     }
 
-    /**
-     * Get sync status
-     */
     getSyncStatus() {
         const queue = this.getSyncQueue();
         const lastSync = this.getLastSync();
@@ -372,5 +398,4 @@ class SyncManager {
     }
 }
 
-// Export singleton instance
 export const syncManager = new SyncManager();

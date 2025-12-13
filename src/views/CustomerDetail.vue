@@ -4,7 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useCustomersStore } from '@/stores/customers'
 import { useOrdersStore } from '@/stores/orders'
 import { useMeasurementsStore } from '@/stores/measurements'
-import { format } from 'date-fns'
+import { format, parseISO, isValid } from 'date-fns'
 import Modal from '@/components/ui/Modal.vue'
 
 const route = useRoute()
@@ -40,7 +40,26 @@ const addMeasurement = () => {
   })
 }
 
-const formatDate = (date) => format(new Date(date), 'MMM d, yyyy')
+// Fixed: Handle invalid dates safely
+const formatDate = (date) => {
+  if (!date) return 'N/A'
+  
+  try {
+    // Try to parse the date
+    const parsedDate = typeof date === 'string' ? parseISO(date) : new Date(date)
+    
+    // Check if date is valid
+    if (!isValid(parsedDate)) {
+      console.warn('Invalid date:', date)
+      return 'Invalid date'
+    }
+    
+    return format(parsedDate, 'MMM d, yyyy')
+  } catch (error) {
+    console.error('Date formatting error:', error, date)
+    return 'Invalid date'
+  }
+}
 
 const getStatusClass = (status) => {
   const classes = {
