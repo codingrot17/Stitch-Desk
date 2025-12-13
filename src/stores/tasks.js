@@ -1,99 +1,200 @@
-import { defineStore } from 'pinia'
-import { ref, computed } from 'vue'
+// src/stores/tasks.js - Updated with Appwrite integration
+import { defineStore } from "pinia";
+import { ref, computed } from "vue";
+import { syncManager } from "@/services/syncManager";
+import { COLLECTIONS } from "@/services/appwrite";
 
-export const useTasksStore = defineStore('tasks', () => {
-  const tasks = ref(JSON.parse(localStorage.getItem('tasks')) || [])
+const STORAGE_KEY = "tasks";
 
-  const priorities = ['high', 'medium', 'low']
-  const statuses = ['todo', 'in-progress', 'done']
+export const useTasksStore = defineStore("tasks", () => {
+    // State
+    const tasks = ref(JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]"));
+    const loading = ref(false);
+    const error = ref(null);
 
-  const totalTasks = computed(() => tasks.value.length)
+    // Constants
+    const priorities = ["high", "medium", "low"];
+    const statuses = ["todo", "in-progress", "done"];
 
-  const pendingTasks = computed(() => 
-    tasks.value.filter(t => t.status !== 'done')
-  )
+    // Computed properties
+    const totalTasks = computed(() => tasks.value.length);
 
-  const todayTasks = computed(() => {
-    const today = new Date().toISOString().split('T')[0]
-    return tasks.value.filter(t => 
-      t.dueDate?.startsWith(today) && t.status !== 'done'
-    )
-  })
+    const pendingTasks = computed(() =>
+        tasks.value.filter(t => t.status !== "done")
+    );
 
-  const tasksByStatus = computed(() => {
-    return statuses.reduce((acc, status) => {
-      acc[status] = tasks.value.filter(t => t.status === status)
-      return acc
-    }, {})
-  })
+    const todayTasks = computed(() => {
+        const today = new Date().toISOString().split("T")[0];
+        return tasks.value.filter(
+            t => t.dueDate?.startsWith(today) && t.status !== "done"
+        );
+    });
 
-  const highPriorityTasks = computed(() => 
-    tasks.value.filter(t => t.priority === 'high' && t.status !== 'done')
-  )
+    const tasksByStatus = computed(() => {
+        return statuses.reduce((acc, status) => {
+            acc[status] = tasks.value.filter(t => t.status === status);
+            return acc;
+        }, {});
+    });
 
-  function saveToStorage() {
-    localStorage.setItem('tasks', JSON.stringify(tasks.value))
-  }
+    const highPriorityTasks = computed(() =>
+        tasks.value.filter(t => t.priority === "high" && t.status !== "done")
+    );
 
-  function addTask(task) {
-    const newTask = {
-      id: Date.now().toString(),
-      status: 'todo',
-      priority: 'medium',
-      ...task,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
+    // Actions
+
+    /**
+     * Fetch tasks from Appwrite (syncs with localStorage)
+     */
+    async function fetchTasks() {
+        loading.value = true;
+        error.value = null;
+
+        try {
+            const items = await syncManager.fetch(
+                COLLECTIONS.TASKS,
+                STORAGE_KEY
+            );
+            tasks.value = items;
+            return items;
+        } catch (e) {
+            error.value = e.message;
+            console.error("Failed to fetch tasks:", e);
+        } finally {
+            loading.value = false;
+        }
     }
-    tasks.value.push(newTask)
-    saveToStorage()
-    return newTask
-  }
 
-  function updateTask(id, updates) {
-    const index = tasks.value.findIndex(t => t.id === id)
-    if (index !== -1) {
-      tasks.value[index] = {
-        ...tasks.value[index],
-        ...updates,
-        updatedAt: new Date().toISOString()
-      }
-      saveToStorage()
-      return tasks.value[index]
+    /**
+     * Add new task (hybrid storage)
+     */
+    async function addTask(task) {
+        loading.value = true;
+        error.value = null;
+
+        try {
+            const newTask = {
+                status: "todo",
+                priority: "medium",
+                ...task
+            };
+
+            const result = await syncManager.create(
+                COLLECTIONS.TASKS,
+                newTask,
+                STORAGE_KEY
+            );
+
+            // Reload from localStorage to get updated data
+            tasks.value = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
+
+            return result;
+        } catch (e) {
+            error.value = e.message;
+            console.error("Failed to add task:", e);
+            throw e;
+        } finally {
+            loading.value = false;
+        }
     }
-    return null
-  }
 
-  function updateTaskStatus(id, status) {
-    return updateTask(id, { status })
-  }
+    /**
+     * Update existing task (hybrid storage)
+     */
+    async function updateTask(id, updates) {
+        loading.value = true;
+        error.value = null;
 
-  function deleteTask(id) {
-    const index = tasks.value.findIndex(t => t.id === id)
-    if (index !== -1) {
-      tasks.value.splice(index, 1)
-      saveToStorage()
-      return true
+        try {
+            const result = await syncManager.update(
+                COLLECTIONS.TASKS,
+                id,
+                updates,
+                STORAGE_KEY
+            );
+
+            // Reload from localStorage
+            tasks.value = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
+
+            return result;
+        } catch (e) {
+            error.value = e.message;
+            console.error("Failed to update task:", e);
+            throw e;
+        } finally {
+            loading.value = false;
+        }
     }
-    return false
-  }
 
-  function getTaskById(id) {
-    return tasks.value.find(t => t.id === id)
-  }
+    /**
+     * Update task status (convenience method)
+     */
+    async function updateTaskStatus(id, status) {
+        return updateTask(id, { status });
+    }
 
-  return {
-    tasks,
-    priorities,
-    statuses,
-    totalTasks,
-    pendingTasks,
-    todayTasks,
-    tasksByStatus,
-    highPriorityTasks,
-    addTask,
-    updateTask,
-    updateTaskStatus,
-    deleteTask,
-    getTaskById
-  }
-})
+    /**
+     * Delete task (hybrid storage)
+     */
+    async function deleteTask(id) {
+        loading.value = true;
+        error.value = null;
+
+        try {
+            await syncManager.delete(COLLECTIONS.TASKS, id, STORAGE_KEY);
+
+            // Reload from localStorage
+            tasks.value = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
+
+            return true;
+        } catch (e) {
+            error.value = e.message;
+            console.error("Failed to delete task:", e);
+            throw e;
+        } finally {
+            loading.value = false;
+        }
+    }
+
+    /**
+     * Get task by ID (local only)
+     */
+    function getTaskById(id) {
+        return tasks.value.find(t => t.id === id);
+    }
+
+    /**
+     * Trigger manual sync
+     */
+    async function syncNow() {
+        await syncManager.syncNow();
+        await fetchTasks();
+    }
+
+    return {
+        // State
+        tasks,
+        loading,
+        error,
+
+        // Constants
+        priorities,
+        statuses,
+
+        // Computed
+        totalTasks,
+        pendingTasks,
+        todayTasks,
+        tasksByStatus,
+        highPriorityTasks,
+
+        // Actions
+        fetchTasks,
+        addTask,
+        updateTask,
+        updateTaskStatus,
+        deleteTask,
+        getTaskById,
+        syncNow
+    };
+});

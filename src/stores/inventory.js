@@ -1,93 +1,233 @@
-import { defineStore } from 'pinia'
-import { ref, computed } from 'vue'
+// src/stores/inventory.js - Updated with Appwrite integration
+import { defineStore } from "pinia";
+import { ref, computed } from "vue";
+import { syncManager } from "@/services/syncManager";
+import { COLLECTIONS } from "@/services/appwrite";
 
-export const useInventoryStore = defineStore('inventory', () => {
-  const items = ref(JSON.parse(localStorage.getItem('inventory')) || [])
+const STORAGE_KEY = "inventory";
 
-  const categories = ['fabric', 'thread', 'button', 'zipper', 'accessory', 'other']
+export const useInventoryStore = defineStore("inventory", () => {
+    // State
+    const items = ref(JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]"));
+    const loading = ref(false);
+    const error = ref(null);
 
-  const totalItems = computed(() => items.value.length)
+    // Constants
+    const categories = [
+        "fabric",
+        "thread",
+        "button",
+        "zipper",
+        "accessory",
+        "other"
+    ];
 
-  const lowStockItems = computed(() => 
-    items.value.filter(item => item.quantity <= item.minStock)
-  )
+    // Computed properties
+    const totalItems = computed(() => items.value.length);
 
-  const lowStockCount = computed(() => lowStockItems.value.length)
+    const lowStockItems = computed(() =>
+        items.value.filter(item => item.quantity <= item.minStock)
+    );
 
-  const itemsByCategory = computed(() => {
-    return categories.reduce((acc, category) => {
-      acc[category] = items.value.filter(item => item.category === category)
-      return acc
-    }, {})
-  })
+    const lowStockCount = computed(() => lowStockItems.value.length);
 
-  function saveToStorage() {
-    localStorage.setItem('inventory', JSON.stringify(items.value))
-  }
+    const itemsByCategory = computed(() => {
+        return categories.reduce((acc, category) => {
+            acc[category] = items.value.filter(
+                item => item.category === category
+            );
+            return acc;
+        }, {});
+    });
 
-  function addItem(item) {
-    const newItem = {
-      id: Date.now().toString(),
-      ...item,
-      minStock: item.minStock || 5,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
+    // Actions
+
+    /**
+     * Fetch inventory from Appwrite (syncs with localStorage)
+     */
+    async function fetchInventory() {
+        loading.value = true;
+        error.value = null;
+
+        try {
+            const fetchedItems = await syncManager.fetch(
+                COLLECTIONS.INVENTORY,
+                STORAGE_KEY
+            );
+            items.value = fetchedItems;
+            return fetchedItems;
+        } catch (e) {
+            error.value = e.message;
+            console.error("Failed to fetch inventory:", e);
+        } finally {
+            loading.value = false;
+        }
     }
-    items.value.push(newItem)
-    saveToStorage()
-    return newItem
-  }
 
-  function updateItem(id, updates) {
-    const index = items.value.findIndex(item => item.id === id)
-    if (index !== -1) {
-      items.value[index] = {
-        ...items.value[index],
-        ...updates,
-        updatedAt: new Date().toISOString()
-      }
-      saveToStorage()
-      return items.value[index]
+    /**
+     * Add new inventory item (hybrid storage)
+     */
+    async function addItem(item) {
+        loading.value = true;
+        error.value = null;
+
+        try {
+            const newItem = {
+                ...item,
+                minStock: item.minStock || 5
+            };
+
+            const result = await syncManager.create(
+                COLLECTIONS.INVENTORY,
+                newItem,
+                STORAGE_KEY
+            );
+
+            // Reload from localStorage to get updated data
+            items.value = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
+
+            return result;
+        } catch (e) {
+            error.value = e.message;
+            console.error("Failed to add inventory item:", e);
+            throw e;
+        } finally {
+            loading.value = false;
+        }
     }
-    return null
-  }
 
-  function updateStock(id, quantityChange) {
-    const item = items.value.find(i => i.id === id)
-    if (item) {
-      item.quantity = Math.max(0, item.quantity + quantityChange)
-      item.updatedAt = new Date().toISOString()
-      saveToStorage()
-      return item
+    /**
+     * Update inventory item (hybrid storage)
+     */
+    async function updateItem(id, updates) {
+        loading.value = true;
+        error.value = null;
+
+        try {
+            const result = await syncManager.update(
+                COLLECTIONS.INVENTORY,
+                id,
+                updates,
+                STORAGE_KEY
+            );
+
+            // Reload from localStorage
+            items.value = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
+
+            return result;
+        } catch (e) {
+            error.value = e.message;
+            console.error("Failed to update inventory item:", e);
+            throw e;
+        } finally {
+            loading.value = false;
+        }
     }
-    return null
-  }
 
-  function deleteItem(id) {
-    const index = items.value.findIndex(item => item.id === id)
-    if (index !== -1) {
-      items.value.splice(index, 1)
-      saveToStorage()
-      return true
+    /**
+     * Update stock quantity (convenience method)
+     * @param {string} id - Item ID
+     * @param {number} quantityChange - Can be positive (add) or negative (subtract)
+     */
+    async function updateStock(id, quantityChange) {
+        loading.value = true;
+        error.value = null;
+
+        try {
+            // Get current item from localStorage
+            const currentItems = JSON.parse(
+                localStorage.getItem(STORAGE_KEY) || "[]"
+            );
+            const item = currentItems.find(i => i.id === id);
+
+            if (!item) {
+                throw new Error("Item not found");
+            }
+
+            // Calculate new quantity (ensure it doesn't go below 0)
+            const newQuantity = Math.max(0, item.quantity + quantityChange);
+
+            // Update with new quantity
+            const result = await syncManager.update(
+                COLLECTIONS.INVENTORY,
+                id,
+                { quantity: newQuantity },
+                STORAGE_KEY
+            );
+
+            // Reload from localStorage
+            items.value = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
+
+            return result;
+        } catch (e) {
+            error.value = e.message;
+            console.error("Failed to update stock:", e);
+            throw e;
+        } finally {
+            loading.value = false;
+        }
     }
-    return false
-  }
 
-  function getItemById(id) {
-    return items.value.find(item => item.id === id)
-  }
+    /**
+     * Delete inventory item (hybrid storage)
+     */
+    async function deleteItem(id) {
+        loading.value = true;
+        error.value = null;
 
-  return {
-    items,
-    categories,
-    totalItems,
-    lowStockItems,
-    lowStockCount,
-    itemsByCategory,
-    addItem,
-    updateItem,
-    updateStock,
-    deleteItem,
-    getItemById
-  }
-})
+        try {
+            await syncManager.delete(COLLECTIONS.INVENTORY, id, STORAGE_KEY);
+
+            // Reload from localStorage
+            items.value = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
+
+            return true;
+        } catch (e) {
+            error.value = e.message;
+            console.error("Failed to delete inventory item:", e);
+            throw e;
+        } finally {
+            loading.value = false;
+        }
+    }
+
+    /**
+     * Get item by ID (local only)
+     */
+    function getItemById(id) {
+        return items.value.find(item => item.id === id);
+    }
+
+    /**
+     * Trigger manual sync
+     */
+    async function syncNow() {
+        await syncManager.syncNow();
+        await fetchInventory();
+    }
+
+    return {
+        // State
+        items,
+        loading,
+        error,
+
+        // Constants
+        categories,
+
+        // Computed
+        totalItems,
+        lowStockItems,
+        lowStockCount,
+        itemsByCategory,
+
+        // Actions
+        fetchInventory,
+        addItem,
+        updateItem,
+        updateStock,
+        deleteItem,
+        getItemById,
+        syncNow
+    };
+});
