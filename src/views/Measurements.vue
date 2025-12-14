@@ -2,7 +2,7 @@
 import { ref, computed } from 'vue'
 import { useMeasurementsStore } from '@/stores/measurements'
 import { useCustomersStore } from '@/stores/customers'
-import { format } from 'date-fns'
+import { format, parseISO, isValid } from 'date-fns'
 import Modal from '@/components/ui/Modal.vue'
 import EmptyState from '@/components/ui/EmptyState.vue'
 
@@ -35,19 +35,27 @@ const viewMeasurement = (measurement) => {
   selectedMeasurement.value = measurement
 }
 
-const handleSubmit = () => {
-  measurementsStore.addMeasurement({
-    customerId: form.value.customerId,
-    name: form.value.name || 'Measurement Profile',
-    values: form.value.values
-  })
-  showModal.value = false
+const handleSubmit = async () => {
+  try {
+    await measurementsStore.addMeasurement({
+      customerId: form.value.customerId,
+      name: form.value.name || 'Measurement Profile',
+      values: form.value.values
+    })
+    showModal.value = false
+  } catch (error) {
+    console.error('Failed to add measurement:', error)
+  }
 }
 
-const handleDelete = (id) => {
+const handleDelete = async (id) => {
   if (confirm('Are you sure you want to delete this measurement?')) {
-    measurementsStore.deleteMeasurement(id)
-    selectedMeasurement.value = null
+    try {
+      await measurementsStore.deleteMeasurement(id)
+      selectedMeasurement.value = null
+    } catch (error) {
+      console.error('Failed to delete measurement:', error)
+    }
   }
 }
 
@@ -56,14 +64,63 @@ const getCustomerName = (customerId) => {
   return customer?.name || 'Unknown'
 }
 
-const formatDate = (date) => format(new Date(date), 'MMM d, yyyy')
+// Fixed: Safe date formatting
+const formatDate = (date) => {
+  if (!date) return 'N/A'
+  
+  try {
+    const parsedDate = typeof date === 'string' ? parseISO(date) : new Date(date)
+    
+    if (!isValid(parsedDate)) {
+      console.warn('Invalid date:', date)
+      return 'N/A'
+    }
+    
+    return format(parsedDate, 'MMM d, yyyy')
+  } catch (error) {
+    console.error('Date formatting error:', error, date)
+    return 'N/A'
+  }
+}
 
+// Fixed: Safe helper to get measurement values as object
+const getMeasurementValues = (measurement) => {
+  if (!measurement || !measurement.values) return {}
+  
+  // If values is already an object, return it
+  if (typeof measurement.values === 'object' && !Array.isArray(measurement.values)) {
+    return measurement.values
+  }
+  
+  // If values is a string, try to parse it
+  if (typeof measurement.values === 'string') {
+    try {
+      return JSON.parse(measurement.values)
+    } catch (error) {
+      console.error('Failed to parse measurement values:', error)
+      return {}
+    }
+  }
+  
+  return {}
+}
+
+// Fixed: Safely get filled values for display
 const filledValues = computed(() => {
   if (!selectedMeasurement.value) return []
-  return Object.entries(selectedMeasurement.value.values)
+  
+  const values = getMeasurementValues(selectedMeasurement.value)
+  
+  return Object.entries(values)
     .filter(([, value]) => value)
     .map(([key, value]) => ({ key, value }))
 })
+
+// Fixed: Get field label with proper string handling
+const getFieldLabel = (key) => {
+  if (typeof key !== 'string') return String(key)
+  return key.replace(/([A-Z])/g, ' $1').trim()
+}
 </script>
 
 <template>
@@ -103,9 +160,9 @@ const filledValues = computed(() => {
               <span class="text-xs text-gray-400">{{ formatDate(measurement.createdAt) }}</span>
             </div>
             <div class="flex flex-wrap gap-2 mt-3">
-              <template v-for="(value, key) in measurement.values" :key="key">
+              <template v-for="(value, key) in getMeasurementValues(measurement)" :key="key">
                 <span v-if="value" class="px-2 py-1 bg-gray-100 rounded text-xs text-gray-600">
-                  {{ key }}: {{ value }}"
+                  {{ getFieldLabel(key) }}: {{ value }}"
                 </span>
               </template>
             </div>
@@ -137,7 +194,7 @@ const filledValues = computed(() => {
             :key="item.key"
             class="flex justify-between items-center py-2 border-b border-gray-100 last:border-0"
           >
-            <span class="text-gray-600 capitalize">{{ item.key.replace(/([A-Z])/g, ' $1') }}</span>
+            <span class="text-gray-600 capitalize">{{ getFieldLabel(item.key) }}</span>
             <span class="font-medium text-gray-900">{{ item.value }}"</span>
           </div>
         </div>

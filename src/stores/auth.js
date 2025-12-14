@@ -1,4 +1,4 @@
-// src/stores/auth.js - Updated with Appwrite Authentication
+// src/stores/auth.js - Fixed with proper logout cleanup
 import { defineStore } from "pinia";
 import { ref, computed } from "vue";
 import { account } from "@/services/appwrite";
@@ -23,11 +23,9 @@ export const useAuthStore = defineStore("auth", () => {
 
     /**
      * Initialize auth state on app load
-     * Checks if user has an active session
      */
     async function init() {
         try {
-            // Check if user has active session in Appwrite
             const currentUser = await account.get();
             user.value = {
                 id: currentUser.$id,
@@ -36,22 +34,24 @@ export const useAuthStore = defineStore("auth", () => {
                 role: "tailor"
             };
             localStorage.setItem("user", JSON.stringify(user.value));
+
+            // Load user's data after confirming they're logged in
+            await loadUserData();
         } catch (e) {
-            // No active session - user needs to login
-            user.value = null;
-            localStorage.removeItem("user");
+            // No active session - clear everything
+            await clearAllData();
         }
     }
 
     /**
-     * Login with email and password using Appwrite
+     * Login with email and password
      */
     async function login(email, password) {
         loading.value = true;
         error.value = null;
 
         try {
-            // Create session in Appwrite
+            // Create session
             const sessionResponse = await account.createEmailPasswordSession(
                 email,
                 password
@@ -70,6 +70,9 @@ export const useAuthStore = defineStore("auth", () => {
 
             localStorage.setItem("user", JSON.stringify(user.value));
 
+            // Load this user's data from Appwrite
+            await loadUserData();
+
             return user.value;
         } catch (e) {
             error.value = handleAuthError(e);
@@ -81,22 +84,22 @@ export const useAuthStore = defineStore("auth", () => {
     }
 
     /**
-     * Signup new user using Appwrite
+     * Signup new user
      */
     async function signup(userData) {
         loading.value = true;
         error.value = null;
 
         try {
-            // Create account in Appwrite Auth
-            const newUser = await account.create(
-                "unique()", // Let Appwrite generate ID
+            // Create account in Appwrite
+            await account.create(
+                "unique()",
                 userData.email,
                 userData.password,
                 userData.name
             );
 
-            // Automatically login after signup
+            // Auto-login after signup
             await login(userData.email, userData.password);
 
             return user.value;
@@ -110,23 +113,114 @@ export const useAuthStore = defineStore("auth", () => {
     }
 
     /**
-     * Logout - delete session from Appwrite
+     * Logout - CRITICAL: Clear all user data
      */
     async function logout() {
         loading.value = true;
         error.value = null;
 
         try {
-            // Delete current session in Appwrite
+            // Delete session in Appwrite
             await account.deleteSession("current");
         } catch (e) {
             console.error("Logout error:", e);
         } finally {
-            user.value = null;
-            session.value = null;
-            localStorage.removeItem("user");
-            localStorage.removeItem("token");
+            // Clear all data regardless of API success
+            await clearAllData();
             loading.value = false;
+        }
+    }
+
+    /**
+     * Load user's data from Appwrite
+     */
+    async function loadUserData() {
+        if (!user.value?.id) return;
+
+        try {
+            console.log("Loading data for user:", user.value.id);
+
+            // Import stores dynamically to avoid circular dependencies
+            const { useCustomersStore } = await import("./customers");
+            const { useOrdersStore } = await import("./orders");
+            const { useTasksStore } = await import("./tasks");
+            const { useInventoryStore } = await import("./inventory");
+            const { useMeasurementsStore } = await import("./measurements");
+            const { useMediaStore } = await import("./media");
+
+            // Fetch each store's data
+            const customersStore = useCustomersStore();
+            const ordersStore = useOrdersStore();
+            const tasksStore = useTasksStore();
+            const inventoryStore = useInventoryStore();
+            const measurementsStore = useMeasurementsStore();
+            const mediaStore = useMediaStore();
+
+            // Fetch data from Appwrite (filtered by user)
+            await Promise.allSettled([
+                customersStore.fetchCustomers(),
+                ordersStore.fetchOrders(),
+                tasksStore.fetchTasks(),
+                inventoryStore.fetchInventory(),
+                measurementsStore.fetchMeasurements(),
+                mediaStore.fetchMedia()
+            ]);
+
+            console.log("✅ User data loaded");
+        } catch (e) {
+            console.error("Failed to load user data:", e);
+        }
+    }
+
+    /**
+     * Clear ALL user data from localStorage
+     * CRITICAL for proper logout
+     */
+    async function clearAllData() {
+        console.log("🗑️ Clearing all user data...");
+
+        // Clear auth data
+        user.value = null;
+        session.value = null;
+        localStorage.removeItem("user");
+        localStorage.removeItem("token");
+
+        // Clear all app data
+        const dataKeys = [
+            "customers",
+            "orders",
+            "tasks",
+            "inventory",
+            "measurements",
+            "media",
+            "sync_queue",
+            "last_sync_timestamp"
+        ];
+
+        dataKeys.forEach(key => {
+            localStorage.removeItem(key);
+            console.log(`  ✓ Cleared ${key}`);
+        });
+
+        // Reset all stores to empty state
+        try {
+            const { useCustomersStore } = await import("./customers");
+            const { useOrdersStore } = await import("./orders");
+            const { useTasksStore } = await import("./tasks");
+            const { useInventoryStore } = await import("./inventory");
+            const { useMeasurementsStore } = await import("./measurements");
+            const { useMediaStore } = await import("./media");
+
+            useCustomersStore().$reset();
+            useOrdersStore().$reset();
+            useTasksStore().$reset();
+            useInventoryStore().$reset();
+            useMeasurementsStore().$reset();
+            useMediaStore().$reset();
+
+            console.log("✅ All data cleared");
+        } catch (e) {
+            console.error("Error resetting stores:", e);
         }
     }
 
@@ -138,25 +232,17 @@ export const useAuthStore = defineStore("auth", () => {
         error.value = null;
 
         try {
-            // Update name in Appwrite (only field we can update)
             if (updates.name && updates.name !== user.value.name) {
                 await account.updateName(updates.name);
             }
 
-            // Update phone if provided (requires prefs)
-            if (updates.phone) {
-                await account.updatePrefs({ phone: updates.phone });
-            }
-
-            // Update business name (stored in prefs)
-            if (updates.businessName) {
+            if (updates.phone || updates.businessName) {
                 await account.updatePrefs({
-                    businessName: updates.businessName,
-                    ...(updates.phone && { phone: updates.phone })
+                    phone: updates.phone,
+                    businessName: updates.businessName
                 });
             }
 
-            // Get updated user data
             const currentUser = await account.get();
             user.value = {
                 id: currentUser.$id,
@@ -181,65 +267,7 @@ export const useAuthStore = defineStore("auth", () => {
     }
 
     /**
-     * Change password
-     */
-    async function changePassword(oldPassword, newPassword) {
-        loading.value = true;
-        error.value = null;
-
-        try {
-            await account.updatePassword(newPassword, oldPassword);
-            return true;
-        } catch (e) {
-            error.value = handleAuthError(e);
-            console.error("Password change failed:", e);
-            throw new Error(error.value);
-        } finally {
-            loading.value = false;
-        }
-    }
-
-    /**
-     * Send password recovery email
-     */
-    async function recoverPassword(email) {
-        loading.value = true;
-        error.value = null;
-
-        try {
-            const resetUrl = `${window.location.origin}/reset-password`;
-            await account.createRecovery(email, resetUrl);
-            return true;
-        } catch (e) {
-            error.value = handleAuthError(e);
-            console.error("Password recovery failed:", e);
-            throw new Error(error.value);
-        } finally {
-            loading.value = false;
-        }
-    }
-
-    /**
-     * Complete password recovery
-     */
-    async function completePasswordRecovery(userId, secret, newPassword) {
-        loading.value = true;
-        error.value = null;
-
-        try {
-            await account.updateRecovery(userId, secret, newPassword);
-            return true;
-        } catch (e) {
-            error.value = handleAuthError(e);
-            console.error("Password reset failed:", e);
-            throw new Error(error.value);
-        } finally {
-            loading.value = false;
-        }
-    }
-
-    /**
-     * Handle Appwrite auth errors
+     * Handle auth errors
      */
     function handleAuthError(error) {
         const errorMessages = {
@@ -272,8 +300,7 @@ export const useAuthStore = defineStore("auth", () => {
         signup,
         logout,
         updateProfile,
-        changePassword,
-        recoverPassword,
-        completePasswordRecovery
+        loadUserData,
+        clearAllData
     };
 });

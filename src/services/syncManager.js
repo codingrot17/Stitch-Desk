@@ -1,9 +1,10 @@
-// src/services/syncManager.js - Fixed version
+// src/services/syncManager.js - Updated with user-scoped data
 import {
     databases,
     isOnline,
     handleAppwriteError,
-    DATABASE_ID
+    DATABASE_ID,
+    createQuery
 } from "./appwrite";
 import { useToast } from "./toast";
 
@@ -27,6 +28,14 @@ class SyncManager {
             console.log("📴 Offline - changes will be queued");
             useToast().warning("Offline - changes will sync when online");
         });
+    }
+
+    /**
+     * Get current user ID from localStorage
+     */
+    getCurrentUserId() {
+        const user = JSON.parse(localStorage.getItem("user") || "null");
+        return user?.id || null;
     }
 
     getSyncQueue() {
@@ -57,36 +66,46 @@ class SyncManager {
     }
 
     /**
-     * CREATE operation with hybrid storage
+     * CREATE - Add userId to all documents
      */
     async create(collection, data, localStorageKey) {
+        const userId = this.getCurrentUserId();
+        if (!userId) {
+            console.error("No user ID found - cannot create document");
+            throw new Error("User not authenticated");
+        }
+
+        // Add userId to data
+        const dataWithUser = {
+            ...data,
+            userId, // CRITICAL: Tag data with user ID
+            $createdAt: new Date().toISOString(),
+            $updatedAt: new Date().toISOString()
+        };
+
+        // Save to localStorage immediately
         const localData = JSON.parse(
             localStorage.getItem(localStorageKey) || "[]"
         );
         const newItem = {
             id: Date.now().toString(),
-            ...data,
-            _localOnly: true,
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString()
+            ...dataWithUser,
+            _localOnly: true
         };
         localData.push(newItem);
         localStorage.setItem(localStorageKey, JSON.stringify(localData));
 
+        // Try to sync to Appwrite if online
         if (isOnline()) {
             try {
                 const response = await databases.createDocument(
                     DATABASE_ID,
                     collection,
                     "unique()",
-                    {
-                        ...data,
-                        $createdAt: newItem.createdAt,
-                        $updatedAt: newItem.updatedAt
-                    }
+                    dataWithUser
                 );
 
-                // Update local item with Appwrite ID and remove _localOnly flag
+                // Update with Appwrite ID
                 const updatedData = localData.map(item =>
                     item.id === newItem.id
                         ? { ...item, id: response.$id, _localOnly: false }
@@ -105,7 +124,7 @@ class SyncManager {
                     operation: "create",
                     collection,
                     docId: newItem.id,
-                    data,
+                    data: dataWithUser,
                     localStorageKey
                 });
 
@@ -117,7 +136,7 @@ class SyncManager {
                 operation: "create",
                 collection,
                 docId: newItem.id,
-                data,
+                data: dataWithUser,
                 localStorageKey
             });
             return newItem;
@@ -125,52 +144,34 @@ class SyncManager {
     }
 
     /**
-     * UPDATE operation with hybrid storage
-     * FIX: Check if item has valid Appwrite ID before syncing
+     * UPDATE - Ensure userId is preserved
      */
     async update(collection, docId, updates, localStorageKey) {
-        // 1. Update localStorage immediately
+        // Don't allow changing userId
+        const { userId, ...safeUpdates } = updates;
+
         const localData = JSON.parse(
             localStorage.getItem(localStorageKey) || "[]"
         );
         const updatedData = localData.map(item =>
             item.id === docId
-                ? { ...item, ...updates, updatedAt: new Date().toISOString() }
+                ? {
+                      ...item,
+                      ...safeUpdates,
+                      updatedAt: new Date().toISOString()
+                  }
                 : item
         );
         localStorage.setItem(localStorageKey, JSON.stringify(updatedData));
 
-        // Get the updated item to check if it has a valid Appwrite ID
-        const updatedItem = updatedData.find(item => item.id === docId);
-
-        // Check if item exists and has valid Appwrite ID
-        if (!updatedItem) {
-            console.error("Item not found in localStorage:", docId);
-            return null;
-        }
-
-        // Check if this is a local-only item (not yet synced to Appwrite)
-        if (updatedItem._localOnly || !docId || docId.length < 10) {
-            console.log("Item not yet synced to Appwrite, queueing update...");
-            this.addToQueue({
-                operation: "update",
-                collection,
-                docId,
-                data: updates,
-                localStorageKey
-            });
-            return updatedItem;
-        }
-
-        // 2. Try to sync to Appwrite if online and item has valid ID
         if (isOnline()) {
             try {
                 const response = await databases.updateDocument(
                     DATABASE_ID,
                     collection,
-                    docId, // Use the actual Appwrite document ID
+                    docId,
                     {
-                        ...updates,
+                        ...safeUpdates,
                         $updatedAt: new Date().toISOString()
                     }
                 );
@@ -182,52 +183,35 @@ class SyncManager {
                     operation: "update",
                     collection,
                     docId,
-                    data: updates,
+                    data: safeUpdates,
                     localStorageKey
                 });
 
                 useToast().warning("Updated locally - will sync when online");
-                return updatedItem;
+                return updatedData.find(item => item.id === docId);
             }
         } else {
             this.addToQueue({
                 operation: "update",
                 collection,
                 docId,
-                data: updates,
+                data: safeUpdates,
                 localStorageKey
             });
-            return updatedItem;
+            return updatedData.find(item => item.id === docId);
         }
     }
 
     /**
-     * DELETE operation with hybrid storage
-     * FIX: Check if item has valid Appwrite ID before syncing
+     * DELETE
      */
     async delete(collection, docId, localStorageKey) {
-        // 1. Get item before deleting to check if it's synced
         const localData = JSON.parse(
             localStorage.getItem(localStorageKey) || "[]"
         );
-        const itemToDelete = localData.find(item => item.id === docId);
-
-        // 2. Delete from localStorage immediately
         const filteredData = localData.filter(item => item.id !== docId);
         localStorage.setItem(localStorageKey, JSON.stringify(filteredData));
 
-        // Check if item was synced to Appwrite (has valid ID and not _localOnly)
-        if (
-            !itemToDelete ||
-            itemToDelete._localOnly ||
-            !docId ||
-            docId.length < 10
-        ) {
-            console.log("Item was local-only, no need to sync deletion");
-            return true;
-        }
-
-        // 3. Try to sync to Appwrite if online and item was synced
         if (isOnline()) {
             try {
                 await databases.deleteDocument(DATABASE_ID, collection, docId);
@@ -257,47 +241,63 @@ class SyncManager {
     }
 
     /**
-     * FETCH operation - pull from Appwrite, update localStorage
+     * FETCH - Filter by current user
      */
     async fetch(collection, localStorageKey) {
+        const userId = this.getCurrentUserId();
+
+        if (!userId) {
+            console.error("No user ID - cannot fetch data");
+            return [];
+        }
+
         if (!isOnline()) {
-            return JSON.parse(localStorage.getItem(localStorageKey) || "[]");
+            // Return local data filtered by user
+            const allLocal = JSON.parse(
+                localStorage.getItem(localStorageKey) || "[]"
+            );
+            return allLocal.filter(item => item.userId === userId);
         }
 
         try {
+            // Query Appwrite for THIS user's data only
             const response = await databases.listDocuments(
                 DATABASE_ID,
-                collection
+                collection,
+                [
+                    createQuery.equal("userId", userId) // CRITICAL: Filter by user
+                ]
             );
+
             const items = response.documents.map(doc => ({
                 id: doc.$id,
                 ...doc,
                 _localOnly: false
             }));
 
-            // Merge with local-only items (items not yet synced)
-            const localData = JSON.parse(
-                localStorage.getItem(localStorageKey) || "[]"
-            );
-            const localOnlyItems = localData.filter(item => item._localOnly);
-
-            // Combine: Appwrite items + local-only items
-            const mergedItems = [...items, ...localOnlyItems];
-
-            localStorage.setItem(localStorageKey, JSON.stringify(mergedItems));
+            // Update localStorage with user's data
+            localStorage.setItem(localStorageKey, JSON.stringify(items));
             this.updateLastSync();
 
-            return mergedItems;
+            console.log(
+                `✅ Fetched ${items.length} ${collection} for user ${userId}`
+            );
+
+            return items;
         } catch (error) {
             console.error("Fetch failed, using local data:", error);
             useToast().error("Could not fetch latest data");
 
-            return JSON.parse(localStorage.getItem(localStorageKey) || "[]");
+            // Fallback to local data filtered by user
+            const allLocal = JSON.parse(
+                localStorage.getItem(localStorageKey) || "[]"
+            );
+            return allLocal.filter(item => item.userId === userId);
         }
     }
 
     /**
-     * Process sync queue (run all pending operations)
+     * Process sync queue
      */
     async processSyncQueue() {
         if (this.syncInProgress || !isOnline()) return;
@@ -316,21 +316,12 @@ class SyncManager {
 
         for (const op of queue) {
             try {
-                // Skip operations with invalid IDs
-                if (
-                    op.operation !== "create" &&
-                    (!op.docId || op.docId.length < 10)
-                ) {
-                    console.log("Skipping operation with invalid ID:", op);
-                    continue;
-                }
-
                 switch (op.operation) {
                     case "create":
                         await databases.createDocument(
                             DATABASE_ID,
                             op.collection,
-                            "unique()",
+                            op.docId,
                             op.data
                         );
                         break;

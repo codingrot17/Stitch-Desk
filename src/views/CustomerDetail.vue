@@ -27,28 +27,30 @@ measurementsStore.defaultFields.forEach(field => {
   measurementForm.value.values[field.key] = ''
 })
 
-const addMeasurement = () => {
-  measurementsStore.addMeasurement({
-    customerId: route.params.id,
-    name: measurementForm.value.name || `Measurement ${customerMeasurements.value.length + 1}`,
-    values: measurementForm.value.values
-  })
-  showMeasurementModal.value = false
-  measurementForm.value = { name: '', values: {} }
-  measurementsStore.defaultFields.forEach(field => {
-    measurementForm.value.values[field.key] = ''
-  })
+const addMeasurement = async () => {
+  try {
+    await measurementsStore.addMeasurement({
+      customerId: route.params.id,
+      name: measurementForm.value.name || `Measurement ${customerMeasurements.value.length + 1}`,
+      values: measurementForm.value.values
+    })
+    showMeasurementModal.value = false
+    measurementForm.value = { name: '', values: {} }
+    measurementsStore.defaultFields.forEach(field => {
+      measurementForm.value.values[field.key] = ''
+    })
+  } catch (error) {
+    console.error('Failed to add measurement:', error)
+  }
 }
 
-// Fixed: Handle invalid dates safely
+// Fixed: Safe date formatting with proper validation
 const formatDate = (date) => {
   if (!date) return 'N/A'
   
   try {
-    // Try to parse the date
     const parsedDate = typeof date === 'string' ? parseISO(date) : new Date(date)
     
-    // Check if date is valid
     if (!isValid(parsedDate)) {
       console.warn('Invalid date:', date)
       return 'Invalid date'
@@ -69,6 +71,34 @@ const getStatusClass = (status) => {
     'delivered': 'status-delivered'
   }
   return classes[status] || 'status-pending'
+}
+
+// Fixed: Safe helper to get measurement values as object
+const getMeasurementValues = (measurement) => {
+  if (!measurement || !measurement.values) return {}
+  
+  // If values is already an object, return it
+  if (typeof measurement.values === 'object' && !Array.isArray(measurement.values)) {
+    return measurement.values
+  }
+  
+  // If values is a string, try to parse it
+  if (typeof measurement.values === 'string') {
+    try {
+      return JSON.parse(measurement.values)
+    } catch (error) {
+      console.error('Failed to parse measurement values:', error)
+      return {}
+    }
+  }
+  
+  return {}
+}
+
+// Fixed: Get display name for measurement field
+const getFieldLabel = (key) => {
+  if (typeof key !== 'string') return String(key)
+  return key.replace(/([A-Z])/g, ' $1').trim()
 }
 
 if (!customer.value) {
@@ -126,9 +156,9 @@ if (!customer.value) {
               <span class="text-xs text-gray-500">{{ formatDate(measurement.createdAt) }}</span>
             </div>
             <div class="grid grid-cols-3 gap-2 text-sm">
-              <template v-for="(value, key) in measurement.values" :key="key">
+              <template v-for="(value, key) in getMeasurementValues(measurement)" :key="key">
                 <div v-if="value" class="flex justify-between bg-white p-2 rounded">
-                  <span class="text-gray-500 capitalize">{{ key.replace(/([A-Z])/g, ' $1') }}</span>
+                  <span class="text-gray-500 capitalize">{{ getFieldLabel(key) }}</span>
                   <span class="font-medium">{{ value }}"</span>
                 </div>
               </template>
