@@ -1,5 +1,5 @@
-// src/services/appwrite.js
-import { Client, Account, Databases, Storage, Query } from "appwrite";
+// src/services/appwrite.js - Fixed with ID import
+import { Client, Account, Databases, Storage, Query, ID } from "appwrite";
 
 // Appwrite Configuration
 const APPWRITE_ENDPOINT = "https://cloud.appwrite.io/v1";
@@ -15,6 +15,9 @@ export const account = new Account(client);
 export const databases = new Databases(client);
 export const storage = new Storage(client);
 
+// Export ID for generating unique IDs
+export { ID };
+
 // Database & Collection IDs (will be created in Appwrite Console)
 export const DATABASE_ID = "693bd3da000741f6a52d";
 export const COLLECTIONS = {
@@ -26,7 +29,7 @@ export const COLLECTIONS = {
     MEDIA: "media"
 };
 
-// Storage Bucket ID
+// Storage Bucket ID - UPDATE THIS WITH YOUR BUCKET ID
 export const MEDIA_BUCKET_ID = "693c33860005a7b9a2a0";
 
 // Query helpers

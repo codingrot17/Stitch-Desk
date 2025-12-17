@@ -1,8 +1,15 @@
-// src/stores/media.js - Updated with Appwrite integration
+// src/stores/media.js - Updated with Appwrite Storage
 import { defineStore } from "pinia";
 import { ref, computed } from "vue";
 import { syncManager } from "@/services/syncManager";
 import { COLLECTIONS } from "@/services/appwrite";
+import {
+    uploadMedia,
+    deleteFile,
+    isStorageUrl,
+    extractFileId,
+    getFilePreview
+} from "@/services/storage";
 
 const STORAGE_KEY = "media";
 
@@ -13,6 +20,7 @@ export const useMediaStore = defineStore("media", () => {
     );
     const loading = ref(false);
     const error = ref(null);
+    const uploadProgress = ref(0);
 
     // Constants
     const categories = [
@@ -60,68 +68,82 @@ export const useMediaStore = defineStore("media", () => {
     }
 
     /**
-     * Add new media (hybrid storage)
-     *
-     * NOTE: For images stored as base64:
-     * - They will be saved to localStorage for offline access
-     * - Base64 URLs are NOT synced to Appwrite (too large)
-     * - Only metadata (name, category, etc.) syncs to cloud
-     *
-     * For production, consider uploading images to Appwrite Storage
-     * and storing the file URL instead of base64.
+     * Add new media - WITH APPWRITE STORAGE
+     * @param {File} file - File object from input
+     * @param {Object} metadata - Additional metadata
      */
-    async function addMedia(media) {
+    async function addMedia(file, metadata = {}) {
         loading.value = true;
         error.value = null;
+        uploadProgress.value = 0;
 
         try {
-            // Check if URL is base64 (starts with 'data:')
-            const isBase64 = media.url?.startsWith("data:");
+            console.log("📤 Uploading media to Appwrite Storage...");
 
-            if (isBase64) {
-                // For base64 images: Save to localStorage only
-                // Don't sync large base64 to Appwrite
-                const newMedia = {
-                    id: Date.now().toString(),
-                    ...media,
-                    _localOnly: true, // Flag to indicate not synced
-                    createdAt: new Date().toISOString()
-                };
+            // Upload file to Appwrite Storage
+            const uploadResult = await uploadMedia(file, metadata);
 
-                const localData = JSON.parse(
-                    localStorage.getItem(STORAGE_KEY) || "[]"
-                );
-                localData.push(newMedia);
-                localStorage.setItem(STORAGE_KEY, JSON.stringify(localData));
+            console.log("✅ Media uploaded:", uploadResult);
 
-                mediaItems.value = localData;
+            // Create media record with Appwrite URL
+            const mediaData = {
+                name: metadata.name || file.name,
+                category: metadata.category || "other",
+                customerId: metadata.customerId || "",
+                orderId: metadata.orderId || "",
+                notes: metadata.notes || "",
+                // Storage info
+                url: uploadResult.url,
+                fileId: uploadResult.fileId
+                // Note: fileSize, fileType, fileName removed because
+                // they're not in the database schema
+            };
 
-                console.warn(
-                    "Base64 images are stored locally only and not synced to Appwrite"
-                );
+            // Save to Appwrite database
+            const result = await syncManager.create(
+                COLLECTIONS.MEDIA,
+                mediaData,
+                STORAGE_KEY
+            );
 
-                return newMedia;
-            } else {
-                // For external URLs: Sync normally
-                const result = await syncManager.create(
-                    COLLECTIONS.MEDIA,
-                    media,
-                    STORAGE_KEY
-                );
+            // Reload from localStorage
+            mediaItems.value = JSON.parse(
+                localStorage.getItem(STORAGE_KEY) || "[]"
+            );
 
-                // Reload from localStorage
-                mediaItems.value = JSON.parse(
-                    localStorage.getItem(STORAGE_KEY) || "[]"
-                );
+            uploadProgress.value = 100;
 
-                return result;
-            }
+            console.log("✅ Media record created");
+            return result;
         } catch (e) {
             error.value = e.message;
             console.error("Failed to add media:", e);
             throw e;
         } finally {
             loading.value = false;
+            setTimeout(() => {
+                uploadProgress.value = 0;
+            }, 1000);
+        }
+    }
+
+    /**
+     * Add media from base64 (for backward compatibility)
+     * This will still work but stores in Appwrite Storage
+     */
+    async function addMediaFromBase64(base64Data, metadata = {}) {
+        try {
+            // Convert base64 to File object
+            const response = await fetch(base64Data);
+            const blob = await response.blob();
+            const fileName = metadata.name || `media_${Date.now()}.png`;
+            const file = new File([blob], fileName, { type: blob.type });
+
+            // Upload using regular flow
+            return await addMedia(file, metadata);
+        } catch (error) {
+            console.error("Failed to add media from base64:", error);
+            throw error;
         }
     }
 
@@ -133,37 +155,22 @@ export const useMediaStore = defineStore("media", () => {
         error.value = null;
 
         try {
-            // Get current item to check if it's base64
-            const currentItems = JSON.parse(
+            // Don't allow changing URL/fileId
+            const { url, fileId, ...safeUpdates } = updates;
+
+            const result = await syncManager.update(
+                COLLECTIONS.MEDIA,
+                id,
+                safeUpdates,
+                STORAGE_KEY
+            );
+
+            // Reload from localStorage
+            mediaItems.value = JSON.parse(
                 localStorage.getItem(STORAGE_KEY) || "[]"
             );
-            const item = currentItems.find(m => m.id === id);
 
-            if (item?._localOnly || item?.url?.startsWith("data:")) {
-                // Update localStorage only for base64 images
-                const updatedItems = currentItems.map(m =>
-                    m.id === id ? { ...m, ...updates, _localOnly: true } : m
-                );
-                localStorage.setItem(STORAGE_KEY, JSON.stringify(updatedItems));
-                mediaItems.value = updatedItems;
-
-                return updatedItems.find(m => m.id === id);
-            } else {
-                // Normal sync for external URLs
-                const result = await syncManager.update(
-                    COLLECTIONS.MEDIA,
-                    id,
-                    updates,
-                    STORAGE_KEY
-                );
-
-                // Reload from localStorage
-                mediaItems.value = JSON.parse(
-                    localStorage.getItem(STORAGE_KEY) || "[]"
-                );
-
-                return result;
-            }
+            return result;
         } catch (e) {
             error.value = e.message;
             console.error("Failed to update media:", e);
@@ -174,13 +181,23 @@ export const useMediaStore = defineStore("media", () => {
     }
 
     /**
-     * Delete media (hybrid storage)
+     * Delete media - WITH STORAGE CLEANUP
      */
     async function deleteMedia(id) {
         loading.value = true;
         error.value = null;
 
         try {
+            // Get media item to find fileId
+            const mediaItem = mediaItems.value.find(m => m.id === id);
+
+            if (mediaItem?.fileId) {
+                // Delete file from Appwrite Storage
+                await deleteFile(mediaItem.fileId);
+                console.log("🗑️ Deleted media file from storage");
+            }
+
+            // Delete database record
             await syncManager.delete(COLLECTIONS.MEDIA, id, STORAGE_KEY);
 
             // Reload from localStorage
@@ -188,6 +205,7 @@ export const useMediaStore = defineStore("media", () => {
                 localStorage.getItem(STORAGE_KEY) || "[]"
             );
 
+            console.log("✅ Media deleted");
             return true;
         } catch (e) {
             error.value = e.message;
@@ -220,6 +238,30 @@ export const useMediaStore = defineStore("media", () => {
     }
 
     /**
+     * Get preview URL for media
+     * @param {string} id - Media ID
+     * @param {number} width - Width in pixels
+     * @param {number} height - Height in pixels
+     * @returns {string|null} - Preview URL
+     */
+    function getPreviewUrl(id, width = 400, height = 400) {
+        const media = getMediaById(id);
+        if (!media?.fileId) return null;
+
+        return getFilePreview(media.fileId, width, height);
+    }
+
+    /**
+     * Check if media is stored in Appwrite Storage
+     * @param {string} id - Media ID
+     * @returns {boolean}
+     */
+    function isInStorage(id) {
+        const media = getMediaById(id);
+        return media?.url ? isStorageUrl(media.url) : false;
+    }
+
+    /**
      * Trigger manual sync
      */
     async function syncNow() {
@@ -227,11 +269,78 @@ export const useMediaStore = defineStore("media", () => {
         await fetchMedia();
     }
 
+    /**
+     * Migrate old base64 media to Appwrite Storage
+     * Run this once to upgrade existing data
+     */
+    async function migrateToStorage() {
+        console.log("🔄 Starting media migration to Appwrite Storage...");
+
+        let migrated = 0;
+        let failed = 0;
+
+        for (const media of mediaItems.value) {
+            // Skip if already in storage
+            if (isStorageUrl(media.url)) {
+                console.log(`⏭️ Skipping ${media.name} - already in storage`);
+                continue;
+            }
+
+            // Skip if no valid URL
+            if (!media.url || !media.url.startsWith("data:")) {
+                console.log(`⏭️ Skipping ${media.name} - no valid data`);
+                continue;
+            }
+
+            try {
+                console.log(`📤 Migrating ${media.name}...`);
+
+                // Convert base64 to File
+                const response = await fetch(media.url);
+                const blob = await response.blob();
+                const file = new File([blob], media.fileName || media.name, {
+                    type: blob.type
+                });
+
+                // Upload to storage
+                const uploadResult = await uploadMedia(file);
+
+                // Update media record
+                await syncManager.update(
+                    COLLECTIONS.MEDIA,
+                    media.id,
+                    {
+                        url: uploadResult.url,
+                        fileId: uploadResult.fileId
+                        // Removed fileSize, fileType as they're not in schema
+                    },
+                    STORAGE_KEY
+                );
+
+                migrated++;
+                console.log(`✅ Migrated ${media.name}`);
+            } catch (error) {
+                failed++;
+                console.error(`❌ Failed to migrate ${media.name}:`, error);
+            }
+        }
+
+        // Reload data
+        await fetchMedia();
+
+        console.log(
+            `✅ Migration complete: ${migrated} migrated, ${failed} failed`
+        );
+
+        return { migrated, failed };
+    }
+
     return {
         // State
         mediaItems,
         loading,
         error,
+        uploadProgress,
 
         // Constants
         categories,
@@ -243,11 +352,15 @@ export const useMediaStore = defineStore("media", () => {
         // Actions
         fetchMedia,
         addMedia,
+        addMediaFromBase64,
         updateMedia,
         deleteMedia,
         getMediaById,
         getMediaByCustomer,
         getMediaByOrder,
-        syncNow
+        getPreviewUrl,
+        isInStorage,
+        syncNow,
+        migrateToStorage
     };
 });

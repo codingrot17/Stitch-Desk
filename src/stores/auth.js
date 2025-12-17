@@ -1,4 +1,4 @@
-// src/stores/auth.js - Fixed with proper logout cleanup
+// src/stores/auth.js - Updated with new profile fields
 import { defineStore } from "pinia";
 import { ref, computed } from "vue";
 import { account } from "@/services/appwrite";
@@ -27,11 +27,22 @@ export const useAuthStore = defineStore("auth", () => {
     async function init() {
         try {
             const currentUser = await account.get();
+            const prefs = currentUser.prefs || {};
+
             user.value = {
                 id: currentUser.$id,
                 name: currentUser.name,
                 email: currentUser.email,
-                role: "tailor"
+                role: "tailor",
+                // Extended profile fields
+                phone: prefs.phone || "",
+                businessName: prefs.businessName || "",
+                logo: prefs.logo || "",
+                whatsapp: prefs.whatsapp || "",
+                instagram: prefs.instagram || "",
+                facebook: prefs.facebook || "",
+                twitter: prefs.twitter || "",
+                bio: prefs.bio || ""
             };
             localStorage.setItem("user", JSON.stringify(user.value));
 
@@ -60,12 +71,22 @@ export const useAuthStore = defineStore("auth", () => {
 
             // Get user details
             const currentUser = await account.get();
+            const prefs = currentUser.prefs || {};
 
             user.value = {
                 id: currentUser.$id,
                 name: currentUser.name,
                 email: currentUser.email,
-                role: "tailor"
+                role: "tailor",
+                // Extended profile fields
+                phone: prefs.phone || "",
+                businessName: prefs.businessName || "",
+                logo: prefs.logo || "",
+                whatsapp: prefs.whatsapp || "",
+                instagram: prefs.instagram || "",
+                facebook: prefs.facebook || "",
+                twitter: prefs.twitter || "",
+                bio: prefs.bio || ""
             };
 
             localStorage.setItem("user", JSON.stringify(user.value));
@@ -225,33 +246,49 @@ export const useAuthStore = defineStore("auth", () => {
     }
 
     /**
-     * Update user profile
+     * Update user profile - ENHANCED with new fields
      */
     async function updateProfile(updates) {
         loading.value = true;
         error.value = null;
 
         try {
+            // Update name if changed
             if (updates.name && updates.name !== user.value.name) {
                 await account.updateName(updates.name);
             }
 
-            if (updates.phone || updates.businessName) {
-                await account.updatePrefs({
-                    phone: updates.phone,
-                    businessName: updates.businessName
-                });
-            }
+            // Update preferences with ALL new fields
+            // NOTE: Logo stored as base64 in prefs - in production,
+            // consider using Appwrite Storage for better performance
+            await account.updatePrefs({
+                phone: updates.phone || "",
+                businessName: updates.businessName || "",
+                logo: updates.logo || "",
+                whatsapp: updates.whatsapp || "",
+                instagram: updates.instagram || "",
+                facebook: updates.facebook || "",
+                twitter: updates.twitter || "",
+                bio: updates.bio || ""
+            });
 
+            // Fetch updated user data
             const currentUser = await account.get();
+            const prefs = currentUser.prefs || {};
+
             user.value = {
                 id: currentUser.$id,
                 name: currentUser.name,
                 email: currentUser.email,
-                phone: currentUser.prefs?.phone || updates.phone,
-                businessName:
-                    currentUser.prefs?.businessName || updates.businessName,
-                role: "tailor"
+                role: "tailor",
+                phone: prefs.phone || "",
+                businessName: prefs.businessName || "",
+                logo: prefs.logo || "",
+                whatsapp: prefs.whatsapp || "",
+                instagram: prefs.instagram || "",
+                facebook: prefs.facebook || "",
+                twitter: prefs.twitter || "",
+                bio: prefs.bio || ""
             };
 
             localStorage.setItem("user", JSON.stringify(user.value));
