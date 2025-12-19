@@ -1,7 +1,8 @@
-// src/stores/auth.js - Updated with new profile fields
+// src/stores/auth.js - Fixed with logo upload to storage
 import { defineStore } from "pinia";
 import { ref, computed } from "vue";
 import { account } from "@/services/appwrite";
+import { uploadLogo, deleteFile, extractFileId, isStorageUrl } from "@/services/storage";
 
 export const useAuthStore = defineStore("auth", () => {
     const user = ref(JSON.parse(localStorage.getItem("user")) || null);
@@ -34,10 +35,10 @@ export const useAuthStore = defineStore("auth", () => {
                 name: currentUser.name,
                 email: currentUser.email,
                 role: "tailor",
-                // Extended profile fields
                 phone: prefs.phone || "",
                 businessName: prefs.businessName || "",
-                logo: prefs.logo || "",
+                logo: prefs.logo || "", // This is now a URL from storage
+                logoFileId: prefs.logoFileId || "", // NEW: Track file ID
                 whatsapp: prefs.whatsapp || "",
                 instagram: prefs.instagram || "",
                 facebook: prefs.facebook || "",
@@ -46,10 +47,8 @@ export const useAuthStore = defineStore("auth", () => {
             };
             localStorage.setItem("user", JSON.stringify(user.value));
 
-            // Load user's data after confirming they're logged in
             await loadUserData();
         } catch (e) {
-            // No active session - clear everything
             await clearAllData();
         }
     }
@@ -62,14 +61,12 @@ export const useAuthStore = defineStore("auth", () => {
         error.value = null;
 
         try {
-            // Create session
             const sessionResponse = await account.createEmailPasswordSession(
                 email,
                 password
             );
             session.value = sessionResponse;
 
-            // Get user details
             const currentUser = await account.get();
             const prefs = currentUser.prefs || {};
 
@@ -78,10 +75,10 @@ export const useAuthStore = defineStore("auth", () => {
                 name: currentUser.name,
                 email: currentUser.email,
                 role: "tailor",
-                // Extended profile fields
                 phone: prefs.phone || "",
                 businessName: prefs.businessName || "",
                 logo: prefs.logo || "",
+                logoFileId: prefs.logoFileId || "",
                 whatsapp: prefs.whatsapp || "",
                 instagram: prefs.instagram || "",
                 facebook: prefs.facebook || "",
@@ -90,8 +87,6 @@ export const useAuthStore = defineStore("auth", () => {
             };
 
             localStorage.setItem("user", JSON.stringify(user.value));
-
-            // Load this user's data from Appwrite
             await loadUserData();
 
             return user.value;
@@ -112,7 +107,6 @@ export const useAuthStore = defineStore("auth", () => {
         error.value = null;
 
         try {
-            // Create account in Appwrite
             await account.create(
                 "unique()",
                 userData.email,
@@ -120,9 +114,7 @@ export const useAuthStore = defineStore("auth", () => {
                 userData.name
             );
 
-            // Auto-login after signup
             await login(userData.email, userData.password);
-
             return user.value;
         } catch (e) {
             error.value = handleAuthError(e);
@@ -134,19 +126,17 @@ export const useAuthStore = defineStore("auth", () => {
     }
 
     /**
-     * Logout - CRITICAL: Clear all user data
+     * Logout
      */
     async function logout() {
         loading.value = true;
         error.value = null;
 
         try {
-            // Delete session in Appwrite
             await account.deleteSession("current");
         } catch (e) {
             console.error("Logout error:", e);
         } finally {
-            // Clear all data regardless of API success
             await clearAllData();
             loading.value = false;
         }
@@ -161,7 +151,6 @@ export const useAuthStore = defineStore("auth", () => {
         try {
             console.log("Loading data for user:", user.value.id);
 
-            // Import stores dynamically to avoid circular dependencies
             const { useCustomersStore } = await import("./customers");
             const { useOrdersStore } = await import("./orders");
             const { useTasksStore } = await import("./tasks");
@@ -169,7 +158,6 @@ export const useAuthStore = defineStore("auth", () => {
             const { useMeasurementsStore } = await import("./measurements");
             const { useMediaStore } = await import("./media");
 
-            // Fetch each store's data
             const customersStore = useCustomersStore();
             const ordersStore = useOrdersStore();
             const tasksStore = useTasksStore();
@@ -177,7 +165,6 @@ export const useAuthStore = defineStore("auth", () => {
             const measurementsStore = useMeasurementsStore();
             const mediaStore = useMediaStore();
 
-            // Fetch data from Appwrite (filtered by user)
             await Promise.allSettled([
                 customersStore.fetchCustomers(),
                 ordersStore.fetchOrders(),
@@ -195,18 +182,15 @@ export const useAuthStore = defineStore("auth", () => {
 
     /**
      * Clear ALL user data from localStorage
-     * CRITICAL for proper logout
      */
     async function clearAllData() {
         console.log("🗑️ Clearing all user data...");
 
-        // Clear auth data
         user.value = null;
         session.value = null;
         localStorage.removeItem("user");
         localStorage.removeItem("token");
 
-        // Clear all app data
         const dataKeys = [
             "customers",
             "orders",
@@ -223,7 +207,6 @@ export const useAuthStore = defineStore("auth", () => {
             console.log(`  ✓ Cleared ${key}`);
         });
 
-        // Reset all stores to empty state
         try {
             const { useCustomersStore } = await import("./customers");
             const { useOrdersStore } = await import("./orders");
@@ -246,31 +229,72 @@ export const useAuthStore = defineStore("auth", () => {
     }
 
     /**
-     * Update user profile - ENHANCED with new fields
+     * Update user profile - FIXED with proper logo handling
      */
     async function updateProfile(updates) {
         loading.value = true;
         error.value = null;
 
         try {
+            console.log("🔄 Updating profile...", updates);
+
             // Update name if changed
             if (updates.name && updates.name !== user.value.name) {
                 await account.updateName(updates.name);
             }
 
-            // Update preferences with ALL new fields
-            // NOTE: Logo stored as base64 in prefs - in production,
-            // consider using Appwrite Storage for better performance
-            await account.updatePrefs({
+            // Handle logo upload/deletion
+            let logoUrl = user.value.logo || "";
+            let logoFileId = user.value.logoFileId || "";
+
+            if (updates.logoFile) {
+                // NEW LOGO: Upload new file
+                console.log("📤 Uploading new logo...");
+                
+                // Delete old logo if exists
+                if (logoFileId) {
+                    await deleteFile(logoFileId);
+                    console.log("🗑️ Deleted old logo");
+                }
+
+                // Upload new logo
+                const uploadResult = await uploadLogo(updates.logoFile);
+                logoUrl = uploadResult.url;
+                logoFileId = uploadResult.fileId;
+                
+                console.log("✅ Logo uploaded:", logoUrl);
+            } else if (updates.logo === "" && logoFileId) {
+                // LOGO REMOVED: Delete from storage
+                console.log("🗑️ Removing logo...");
+                await deleteFile(logoFileId);
+                logoUrl = "";
+                logoFileId = "";
+            } else if (updates.logo && updates.logo !== user.value.logo) {
+                // Logo URL changed (shouldn't happen, but handle it)
+                logoUrl = updates.logo;
+            } else {
+                // No change to logo
+                logoUrl = user.value.logo;
+                logoFileId = user.value.logoFileId;
+            }
+
+            // Prepare preferences object - IMPORTANT: No base64 data!
+            const prefsToUpdate = {
                 phone: updates.phone || "",
                 businessName: updates.businessName || "",
-                logo: updates.logo || "",
+                logo: logoUrl, // Store URL only
+                logoFileId: logoFileId, // Store file ID for deletion
                 whatsapp: updates.whatsapp || "",
                 instagram: updates.instagram || "",
                 facebook: updates.facebook || "",
                 twitter: updates.twitter || "",
                 bio: updates.bio || ""
-            });
+            };
+
+            console.log("💾 Updating preferences...", prefsToUpdate);
+
+            // Update preferences
+            await account.updatePrefs(prefsToUpdate);
 
             // Fetch updated user data
             const currentUser = await account.get();
@@ -284,6 +308,7 @@ export const useAuthStore = defineStore("auth", () => {
                 phone: prefs.phone || "",
                 businessName: prefs.businessName || "",
                 logo: prefs.logo || "",
+                logoFileId: prefs.logoFileId || "",
                 whatsapp: prefs.whatsapp || "",
                 instagram: prefs.instagram || "",
                 facebook: prefs.facebook || "",
@@ -293,6 +318,7 @@ export const useAuthStore = defineStore("auth", () => {
 
             localStorage.setItem("user", JSON.stringify(user.value));
 
+            console.log("✅ Profile updated successfully");
             return user.value;
         } catch (e) {
             error.value = handleAuthError(e);

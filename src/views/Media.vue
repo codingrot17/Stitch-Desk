@@ -1,3 +1,4 @@
+<!-- src/views/Media.vue - Fixed with proper file handling -->
 <script setup>
 import { ref, computed } from 'vue'
 import { useMediaStore } from '@/stores/media'
@@ -14,6 +15,7 @@ const selectedMedia = ref(null)
 const filterCategory = ref('all')
 const selectedFile = ref(null)
 const uploadPreview = ref(null)
+const fileInputKey = ref(0) // KEY: Force file input refresh
 
 const form = ref({
   name: '',
@@ -28,9 +30,11 @@ const filteredMedia = computed(() => {
 })
 
 const openAddModal = () => {
+  // Reset everything
   form.value = { name: '', category: 'fabric-sample', customerId: '', notes: '' }
   selectedFile.value = null
   uploadPreview.value = null
+  fileInputKey.value++ // Force file input reset
   showModal.value = true
 }
 
@@ -45,8 +49,7 @@ const handleSubmit = async () => {
     console.log('File details:', {
       name: selectedFile.value.name,
       size: selectedFile.value.size,
-      type: selectedFile.value.type,
-      lastModified: selectedFile.value.lastModified
+      type: selectedFile.value.type
     })
     
     // Verify it's a proper File object
@@ -62,9 +65,12 @@ const handleSubmit = async () => {
     })
     
     console.log('✅ Upload successful!')
+    
+    // Reset modal state
     showModal.value = false
     selectedFile.value = null
     uploadPreview.value = null
+    fileInputKey.value++ // Reset file input for next upload
   } catch (error) {
     console.error('❌ Upload error:', error)
     alert('Upload failed: ' + error.message)
@@ -106,31 +112,45 @@ const getCategoryLabel = (category) => {
 
 const handleFileSelect = (event) => {
   const file = event.target.files[0]
-  if (file) {
-    // Validate file size (5MB max)
-    if (file.size > 5 * 1024 * 1024) {
-      alert('File must be less than 5MB')
-      return
-    }
-
-    // Validate file type
-    if (!file.type.startsWith('image/')) {
-      alert('Please upload an image file')
-      return
-    }
-
-    selectedFile.value = file
-    
-    // Generate preview
-    const reader = new FileReader()
-    reader.onload = (e) => {
-      uploadPreview.value = e.target.result
-      if (!form.value.name) {
-        form.value.name = file.name.split('.')[0]
-      }
-    }
-    reader.readAsDataURL(file)
+  if (!file) {
+    console.log('No file selected')
+    return
   }
+
+  // Validate file size (5MB max)
+  if (file.size > 5 * 1024 * 1024) {
+    alert('File must be less than 5MB')
+    event.target.value = '' // Clear input
+    fileInputKey.value++ // Reset input
+    return
+  }
+
+  // Validate file type
+  if (!file.type.startsWith('image/')) {
+    alert('Please upload an image file')
+    event.target.value = '' // Clear input
+    fileInputKey.value++ // Reset input
+    return
+  }
+
+  console.log('📷 File selected:', file.name, file.size, 'bytes')
+
+  // Store the actual File object
+  selectedFile.value = file
+  
+  // Generate preview
+  const reader = new FileReader()
+  reader.onload = (e) => {
+    uploadPreview.value = e.target.result
+    if (!form.value.name) {
+      form.value.name = file.name.split('.')[0]
+    }
+  }
+  reader.onerror = (error) => {
+    console.error('FileReader error:', error)
+    alert('Failed to read file')
+  }
+  reader.readAsDataURL(file)
 }
 
 const formatFileSize = (bytes) => {
@@ -195,6 +215,7 @@ const formatFileSize = (bytes) => {
             :src="media.url"
             :alt="media.name"
             class="w-full h-full object-cover group-hover:scale-105 transition-transform duration-200"
+            loading="lazy"
           />
           <div v-else class="w-full h-full flex items-center justify-center">
             <svg class="w-12 h-12 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -233,6 +254,7 @@ const formatFileSize = (bytes) => {
         <div>
           <label class="label">Upload Image</label>
           <input
+            :key="fileInputKey"
             type="file"
             accept="image/*"
             @change="handleFileSelect"
