@@ -1,4 +1,4 @@
-// src/services/syncManager.js - Fixed with proper unique ID generation
+// src/services/syncManager.js - FIXED: Better unique ID generation
 import {
     databases,
     isOnline,
@@ -31,9 +31,6 @@ class SyncManager {
         });
     }
 
-    /**
-     * Get current user ID from localStorage
-     */
     getCurrentUserId() {
         const user = JSON.parse(localStorage.getItem("user") || "null");
         return user?.id || null;
@@ -67,7 +64,20 @@ class SyncManager {
     }
 
     /**
-     * CREATE - Add userId to all documents WITHOUT pre-generated ID
+     * FIXED: Generate truly unique ID with multiple entropy sources
+     */
+    generateUniqueId() {
+        // Combine multiple sources of randomness for better uniqueness
+        const timestamp = Date.now();
+        const random = Math.random().toString(36).substring(2, 15);
+        const random2 = Math.random().toString(36).substring(2, 15);
+        const counter = (window.idCounter = (window.idCounter || 0) + 1);
+
+        return `${timestamp}_${random}${random2}_${counter}`;
+    }
+
+    /**
+     * CREATE - FIXED: Better unique ID generation
      */
     async create(collection, data, localStorageKey) {
         const userId = this.getCurrentUserId();
@@ -76,32 +86,29 @@ class SyncManager {
             throw new Error("User not authenticated");
         }
 
-        // Add userId to data
         const dataWithUser = {
             ...data,
-            userId, // CRITICAL: Tag data with user ID
+            userId,
             $createdAt: new Date().toISOString(),
             $updatedAt: new Date().toISOString()
         };
 
-        // Try to sync to Appwrite FIRST if online
         if (isOnline()) {
             try {
-                console.log(
-                    "📤 Creating document in Appwrite with auto-generated ID"
-                );
+                console.log("📤 Creating document in Appwrite...");
 
-                // Let Appwrite generate the ID automatically
+                // CRITICAL FIX: Use ID.unique() which is Appwrite's built-in unique ID generator
+                // This ensures no collisions
                 const response = await databases.createDocument(
                     DATABASE_ID,
                     collection,
-                    ID.unique(), // Let Appwrite generate ID on the fly
+                    ID.unique(), // Let Appwrite handle ID generation
                     dataWithUser
                 );
 
-                console.log("✅ Document created successfully:", response.$id);
+                console.log("✅ Document created:", response.$id);
 
-                // Now save to localStorage with Appwrite ID
+                // Save to localStorage with Appwrite's ID
                 const localData = JSON.parse(
                     localStorage.getItem(localStorageKey) || "[]"
                 );
@@ -120,12 +127,21 @@ class SyncManager {
 
                 return response;
             } catch (error) {
-                console.error("❌ Sync failed:", error);
+                console.error("❌ Appwrite sync failed:", error);
 
-                // Save locally with temporary ID and queue
-                const tempId = `temp_${Date.now()}_${Math.random()
-                    .toString(36)
-                    .substr(2, 9)}`;
+                // IMPORTANT: If we get a 409 (document already exists),
+                // it means there's a collision. Retry with a new ID.
+                if (error.code === 409) {
+                    console.log(
+                        "🔄 Document ID collision detected, retrying..."
+                    );
+                    // Wait a tiny bit and retry
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                    return this.create(collection, data, localStorageKey);
+                }
+
+                // Save locally with unique temp ID
+                const tempId = this.generateUniqueId();
                 const localData = JSON.parse(
                     localStorage.getItem(localStorageKey) || "[]"
                 );
@@ -154,10 +170,8 @@ class SyncManager {
                 return newItem;
             }
         } else {
-            // Offline: save locally with temporary ID and queue
-            const tempId = `temp_${Date.now()}_${Math.random()
-                .toString(36)
-                .substr(2, 9)}`;
+            // Offline: save with unique temp ID
+            const tempId = this.generateUniqueId();
             const localData = JSON.parse(
                 localStorage.getItem(localStorageKey) || "[]"
             );
@@ -184,10 +198,9 @@ class SyncManager {
     }
 
     /**
-     * UPDATE - Ensure userId is preserved
+     * UPDATE
      */
     async update(collection, docId, updates, localStorageKey) {
-        // Don't allow changing userId
         const { userId, ...safeUpdates } = updates;
 
         const localData = JSON.parse(
@@ -281,7 +294,7 @@ class SyncManager {
     }
 
     /**
-     * FETCH - Filter by current user
+     * FETCH
      */
     async fetch(collection, localStorageKey) {
         const userId = this.getCurrentUserId();
@@ -292,7 +305,6 @@ class SyncManager {
         }
 
         if (!isOnline()) {
-            // Return local data filtered by user
             const allLocal = JSON.parse(
                 localStorage.getItem(localStorageKey) || "[]"
             );
@@ -300,13 +312,10 @@ class SyncManager {
         }
 
         try {
-            // Query Appwrite for THIS user's data only
             const response = await databases.listDocuments(
                 DATABASE_ID,
                 collection,
-                [
-                    createQuery.equal("userId", userId) // CRITICAL: Filter by user
-                ]
+                [createQuery.equal("userId", userId)]
             );
 
             const items = response.documents.map(doc => ({
@@ -315,7 +324,6 @@ class SyncManager {
                 _localOnly: false
             }));
 
-            // Update localStorage with user's data
             localStorage.setItem(localStorageKey, JSON.stringify(items));
             this.updateLastSync();
 
@@ -328,7 +336,6 @@ class SyncManager {
             console.error("Fetch failed, using local data:", error);
             useToast().error("Could not fetch latest data");
 
-            // Fallback to local data filtered by user
             const allLocal = JSON.parse(
                 localStorage.getItem(localStorageKey) || "[]"
             );
@@ -337,7 +344,7 @@ class SyncManager {
     }
 
     /**
-     * Process sync queue
+     * Process sync queue - FIXED: Better error handling for 409 conflicts
      */
     async processSyncQueue() {
         if (this.syncInProgress || !isOnline()) return;
@@ -358,31 +365,41 @@ class SyncManager {
             try {
                 switch (op.operation) {
                     case "create":
-                        // For queued creates, let Appwrite generate new ID
-                        const response = await databases.createDocument(
-                            DATABASE_ID,
-                            op.collection,
-                            ID.unique(), // Generate fresh ID
-                            op.data
-                        );
+                        try {
+                            const response = await databases.createDocument(
+                                DATABASE_ID,
+                                op.collection,
+                                ID.unique(),
+                                op.data
+                            );
 
-                        // Update localStorage with new Appwrite ID
-                        const localData = JSON.parse(
-                            localStorage.getItem(op.localStorageKey) || "[]"
-                        );
-                        const updatedData = localData.map(item =>
-                            item.id === op.docId
-                                ? {
-                                      ...item,
-                                      id: response.$id,
-                                      _localOnly: false
-                                  }
-                                : item
-                        );
-                        localStorage.setItem(
-                            op.localStorageKey,
-                            JSON.stringify(updatedData)
-                        );
+                            // Update localStorage with new Appwrite ID
+                            const localData = JSON.parse(
+                                localStorage.getItem(op.localStorageKey) || "[]"
+                            );
+                            const updatedData = localData.map(item =>
+                                item.id === op.docId
+                                    ? {
+                                          ...item,
+                                          id: response.$id,
+                                          _localOnly: false
+                                      }
+                                    : item
+                            );
+                            localStorage.setItem(
+                                op.localStorageKey,
+                                JSON.stringify(updatedData)
+                            );
+                        } catch (createError) {
+                            // If 409, the document might already exist, skip it
+                            if (createError.code === 409) {
+                                console.warn(
+                                    "Document already synced, skipping"
+                                );
+                            } else {
+                                throw createError;
+                            }
+                        }
                         break;
 
                     case "update":

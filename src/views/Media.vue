@@ -1,4 +1,4 @@
-  <!-- src/views/Media.vue - Fixed with proper file handling -->
+<!-- src/views/Media.vue - UPDATED: Multiple file upload support -->
 <script setup>
 import { ref, computed } from 'vue'
 import { useMediaStore } from '@/stores/media'
@@ -13,12 +13,14 @@ const showModal = ref(false)
 const showPreview = ref(false)
 const selectedMedia = ref(null)
 const filterCategory = ref('all')
-const selectedFile = ref(null)
-const uploadPreview = ref(null)
+const selectedFiles = ref([]) // Changed: Now array of files
+const uploadPreviews = ref([]) // Changed: Array of previews
 const fileInputRef = ref(null)
+const uploadingCount = ref(0)
+const uploadedCount = ref(0)
+const totalFiles = ref(0)
 
 const form = ref({
-  name: '',
   category: 'fabric-sample',
   customerId: '',
   notes: ''
@@ -29,14 +31,24 @@ const filteredMedia = computed(() => {
   return mediaStore.mediaItems.filter(m => m.category === filterCategory.value)
 })
 
+const isUploading = computed(() => uploadingCount.value > 0)
+
+const uploadProgressText = computed(() => {
+  if (totalFiles.value === 0) return ''
+  return `Uploading ${uploadedCount.value} of ${totalFiles.value} files...`
+})
+
 const openAddModal = () => {
   // Reset everything
-  form.value = { name: '', category: 'fabric-sample', customerId: '', notes: '' }
-  selectedFile.value = null
-  uploadPreview.value = null
+  form.value = { category: 'fabric-sample', customerId: '', notes: '' }
+  selectedFiles.value = []
+  uploadPreviews.value = []
+  uploadingCount.value = 0
+  uploadedCount.value = 0
+  totalFiles.value = 0
   showModal.value = true
   
-  // Reset file input after modal opens
+  // Reset file input
   setTimeout(() => {
     if (fileInputRef.value) {
       fileInputRef.value.value = ''
@@ -45,44 +57,58 @@ const openAddModal = () => {
 }
 
 const handleSubmit = async () => {
-  if (!selectedFile.value) {
-    alert('Please select a file to upload')
+  if (selectedFiles.value.length === 0) {
+    alert('Please select at least one file to upload')
     return
   }
 
   try {
-    console.log('🚀 Starting upload process...')
-    console.log('File details:', {
-      name: selectedFile.value.name,
-      size: selectedFile.value.size,
-      type: selectedFile.value.type
-    })
+    console.log(`🚀 Starting batch upload of ${selectedFiles.value.length} files...`)
     
-    // Verify it's a proper File object
-    if (!(selectedFile.value instanceof File)) {
-      throw new Error('Selected file is not a valid File object')
+    totalFiles.value = selectedFiles.value.length
+    uploadingCount.value = selectedFiles.value.length
+    uploadedCount.value = 0
+    
+    // Upload files sequentially to avoid overwhelming the system
+    for (let i = 0; i < selectedFiles.value.length; i++) {
+      const file = selectedFiles.value[i]
+      
+      console.log(`📤 Uploading file ${i + 1}/${selectedFiles.value.length}: ${file.name}`)
+      
+      try {
+        await mediaStore.addMedia(file, {
+          name: file.name.split('.')[0], // Use filename without extension
+          category: form.value.category,
+          customerId: form.value.customerId,
+          notes: form.value.notes
+        })
+        
+        uploadedCount.value++
+        console.log(`✅ Uploaded ${uploadedCount.value}/${totalFiles.value}`)
+      } catch (error) {
+        console.error(`❌ Failed to upload ${file.name}:`, error)
+        alert(`Failed to upload ${file.name}: ${error.message}`)
+      }
+      
+      uploadingCount.value--
     }
     
-    await mediaStore.addMedia(selectedFile.value, {
-      name: form.value.name || selectedFile.value.name,
-      category: form.value.category,
-      customerId: form.value.customerId,
-      notes: form.value.notes
-    })
+    console.log(`✅ Batch upload complete! ${uploadedCount.value}/${totalFiles.value} succeeded`)
     
-    console.log('✅ Upload successful!')
-    
-    // Close modal and reset state
+    // Close modal and reset
     showModal.value = false
-    selectedFile.value = null
-    uploadPreview.value = null
+    selectedFiles.value = []
+    uploadPreviews.value = []
+    uploadingCount.value = 0
+    uploadedCount.value = 0
+    totalFiles.value = 0
     
     // Reset file input
     if (fileInputRef.value) {
       fileInputRef.value.value = ''
     }
   } catch (error) {
-    console.error('❌ Upload error:', error)
+    console.error('❌ Batch upload error:', error)
     alert('Upload failed: ' + error.message)
   }
 }
@@ -121,44 +147,74 @@ const getCategoryLabel = (category) => {
 }
 
 const handleFileSelect = (event) => {
-  const file = event.target.files[0]
-  if (!file) {
-    console.log('No file selected')
+  const files = Array.from(event.target.files) // Convert FileList to Array
+  if (files.length === 0) {
+    console.log('No files selected')
     return
   }
 
-  // Validate file size (5MB max)
-  if (file.size > 5 * 1024 * 1024) {
-    alert('File must be less than 5MB')
-    event.target.value = ''
-    return
-  }
+  console.log(`📷 ${files.length} file(s) selected`)
 
-  // Validate file type
-  if (!file.type.startsWith('image/')) {
-    alert('Please upload an image file')
-    event.target.value = ''
-    return
-  }
+  // Validate all files
+  const validFiles = []
+  const errors = []
 
-  console.log('📷 File selected:', file.name, file.size, 'bytes')
-
-  // Store the actual File object
-  selectedFile.value = file
-  
-  // Generate preview
-  const reader = new FileReader()
-  reader.onload = (e) => {
-    uploadPreview.value = e.target.result
-    if (!form.value.name) {
-      form.value.name = file.name.split('.')[0]
+  for (const file of files) {
+    // Validate file size (5MB max)
+    if (file.size > 5 * 1024 * 1024) {
+      errors.push(`${file.name}: File too large (max 5MB)`)
+      continue
     }
+
+    // Validate file type
+    if (!file.type.startsWith('image/')) {
+      errors.push(`${file.name}: Not an image file`)
+      continue
+    }
+
+    validFiles.push(file)
   }
-  reader.onerror = (error) => {
-    console.error('FileReader error:', error)
-    alert('Failed to read file')
+
+  // Show errors if any
+  if (errors.length > 0) {
+    alert('Some files were skipped:\n' + errors.join('\n'))
   }
-  reader.readAsDataURL(file)
+
+  if (validFiles.length === 0) {
+    event.target.value = ''
+    return
+  }
+
+  // Store valid files
+  selectedFiles.value = validFiles
+  uploadPreviews.value = []
+
+  console.log(`✅ ${validFiles.length} valid file(s) ready for upload`)
+
+  // Generate previews for all valid files
+  validFiles.forEach((file, index) => {
+    const reader = new FileReader()
+    reader.onload = (e) => {
+      uploadPreviews.value.push({
+        url: e.target.result,
+        name: file.name,
+        size: file.size
+      })
+    }
+    reader.onerror = (error) => {
+      console.error(`FileReader error for ${file.name}:`, error)
+    }
+    reader.readAsDataURL(file)
+  })
+}
+
+const removeFile = (index) => {
+  selectedFiles.value.splice(index, 1)
+  uploadPreviews.value.splice(index, 1)
+  
+  if (selectedFiles.value.length === 0 && fileInputRef.value) {
+    fileInputRef.value.value = ''
+  }
 }
 
 const formatFileSize = (bytes) => {
@@ -184,14 +240,14 @@ const formatFileSize = (bytes) => {
     </div>
 
     <!-- Upload Progress Bar -->
-    <div v-if="mediaStore.uploadProgress > 0" class="mb-6">
+    <div v-if="isUploading" class="mb-6">
       <div class="bg-gray-200 rounded-full h-2 overflow-hidden">
         <div 
           class="bg-primary-500 h-full transition-all duration-300"
-          :style="{ width: `${mediaStore.uploadProgress}%` }"
+          :style="{ width: `${(uploadedCount / totalFiles) * 100}%` }"
         ></div>
       </div>
-      <p class="text-sm text-gray-600 mt-1">Uploading... {{ mediaStore.uploadProgress }}%</p>
+      <p class="text-sm text-gray-600 mt-1">{{ uploadProgressText }}</p>
     </div>
 
     <div class="flex gap-2 mb-6 overflow-x-auto pb-2">
@@ -260,29 +316,53 @@ const formatFileSize = (bytes) => {
     <Modal :show="showModal" title="Upload Media" @close="showModal = false">
       <form @submit.prevent="handleSubmit" class="space-y-4">
         <div>
-          <label class="label">Upload Image</label>
+          <label class="label">Select Images (multiple allowed)</label>
           <input
             ref="fileInputRef"
             type="file"
             accept="image/*"
+            multiple
             @change="handleFileSelect"
             class="input-field file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:bg-primary-50 file:text-primary-600 file:font-medium hover:file:bg-primary-100"
           />
-          <p class="text-xs text-gray-500 mt-1">Max file size: 5MB</p>
+          <p class="text-xs text-gray-500 mt-1">Max file size: 5MB per file</p>
         </div>
         
-        <div v-if="uploadPreview" class="aspect-video bg-gray-100 rounded-lg overflow-hidden">
-          <img :src="uploadPreview" class="w-full h-full object-contain" />
-        </div>
-        
-        <div v-if="selectedFile" class="p-3 bg-gray-50 rounded-lg text-sm">
-          <p class="text-gray-600">Selected: <span class="font-medium text-gray-900">{{ selectedFile.name }}</span></p>
-          <p class="text-gray-500 text-xs mt-1">Size: {{ formatFileSize(selectedFile.size) }}</p>
-        </div>
-        
-        <div>
-          <label class="label">Name</label>
-          <input v-model="form.name" type="text" class="input-field" placeholder="Image name" />
+        <!-- Preview Grid for Multiple Files -->
+        <div v-if="uploadPreviews.length > 0" class="space-y-3">
+          <p class="text-sm font-medium text-gray-700">
+            {{ selectedFiles.length }} file(s) selected
+          </p>
+          
+          <div class="grid grid-cols-2 gap-3 max-h-64 overflow-y-auto">
+            <div 
+              v-for="(preview, index) in uploadPreviews" 
+              :key="index"
+              class="relative group"
+            >
+              <div class="aspect-square bg-gray-100 rounded-lg overflow-hidden">
+                <img :src="preview.url" class="w-full h-full object-cover" />
+              </div>
+              
+              <!-- Remove button -->
+              <button
+                type="button"
+                @click="removeFile(index)"
+                class="absolute -top-2 -right-2 w-6 h-6 bg-red-500 rounded-full flex items-center justify-center hover:bg-red-600 transition-colors shadow-lg"
+                title="Remove"
+              >
+                <svg class="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+              
+              <!-- File info overlay -->
+              <div class="absolute bottom-0 left-0 right-0 bg-black/70 text-white p-2 text-xs">
+                <p class="truncate font-medium">{{ preview.name }}</p>
+                <p class="text-gray-300">{{ formatFileSize(preview.size) }}</p>
+              </div>
+            </div>
+          </div>
         </div>
         
         <div class="grid grid-cols-2 gap-4">
@@ -306,19 +386,21 @@ const formatFileSize = (bytes) => {
         </div>
         
         <div>
-          <label class="label">Notes</label>
+          <label class="label">Notes (applies to all files)</label>
           <textarea v-model="form.notes" rows="2" class="input-field" placeholder="Additional notes..."></textarea>
         </div>
         
         <div class="flex gap-3 pt-4">
-          <button type="button" @click="showModal = false" class="btn-ghost flex-1">Cancel</button>
+          <button type="button" @click="showModal = false" class="btn-ghost flex-1" :disabled="isUploading">
+            Cancel
+          </button>
           <button 
             type="submit" 
-            :disabled="!selectedFile || mediaStore.loading" 
+            :disabled="selectedFiles.length === 0 || isUploading" 
             class="btn-primary flex-1 disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            <span v-if="mediaStore.loading">Uploading...</span>
-            <span v-else>Upload</span>
+            <span v-if="isUploading">Uploading {{ uploadedCount }}/{{ totalFiles }}...</span>
+            <span v-else>Upload {{ selectedFiles.length > 0 ? `(${selectedFiles.length})` : '' }}</span>
           </button>
         </div>
       </form>

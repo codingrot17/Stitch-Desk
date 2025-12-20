@@ -1,4 +1,4 @@
-// src/stores/auth.js - Fixed with proper logo handling via Storage
+// src/stores/auth.js - Updated to handle new media system
 import { defineStore } from "pinia";
 import { ref, computed } from "vue";
 import { account } from "@/services/appwrite";
@@ -143,7 +143,7 @@ export const useAuthStore = defineStore("auth", () => {
     }
 
     /**
-     * Load user's data from Appwrite
+     * Load user's data from stores
      */
     async function loadUserData() {
         if (!user.value?.id) return;
@@ -171,7 +171,7 @@ export const useAuthStore = defineStore("auth", () => {
                 tasksStore.fetchTasks(),
                 inventoryStore.fetchInventory(),
                 measurementsStore.fetchMeasurements(),
-                mediaStore.fetchMedia()
+                mediaStore.fetchMedia() // Now loads from localStorage filtered by user
             ]);
 
             console.log("✅ User data loaded");
@@ -182,22 +182,24 @@ export const useAuthStore = defineStore("auth", () => {
 
     /**
      * Clear ALL user data from localStorage
+     * NOTE: Media is now per-user in localStorage, so we only clear current user's data
      */
     async function clearAllData() {
-        console.log("🗑️ Clearing all user data...");
+        console.log("🗑️ Clearing user data...");
 
         user.value = null;
         session.value = null;
         localStorage.removeItem("user");
         localStorage.removeItem("token");
 
+        // Clear other data (these are still per-user via syncManager)
         const dataKeys = [
             "customers",
             "orders",
             "tasks",
             "inventory",
             "measurements",
-            "media",
+            // Media is NOT cleared here - it's filtered by userId in the store
             "sync_queue",
             "last_sync_timestamp"
         ];
@@ -229,18 +231,14 @@ export const useAuthStore = defineStore("auth", () => {
     }
 
     /**
-     * Update user profile - FIXED with proper logo handling
+     * Update user profile
      */
     async function updateProfile(updates) {
         loading.value = true;
         error.value = null;
 
         try {
-            console.log("🔄 Updating profile...", {
-                ...updates,
-                logoFile: updates.logoFile ? "FILE_OBJECT" : undefined,
-                logo: updates.logo ? "URL_STRING" : undefined
-            });
+            console.log("🔄 Updating profile...");
 
             // Update name if changed
             if (updates.name && updates.name !== user.value.name) {
@@ -252,7 +250,6 @@ export const useAuthStore = defineStore("auth", () => {
             let logoFileId = user.value.logoFileId || "";
 
             if (updates.logoFile) {
-                // NEW LOGO: Upload new file
                 console.log("📤 Uploading new logo...");
 
                 // Delete old logo if exists
@@ -268,14 +265,13 @@ export const useAuthStore = defineStore("auth", () => {
 
                 console.log("✅ Logo uploaded:", logoUrl);
             } else if (updates.removeLogo && logoFileId) {
-                // LOGO REMOVED: Delete from storage
                 console.log("🗑️ Removing logo...");
                 await deleteFile(logoFileId);
                 logoUrl = "";
                 logoFileId = "";
             }
 
-            // Prepare preferences object - ONLY URLs, NO BASE64!
+            // Prepare preferences object
             const prefsToUpdate = {
                 phone:
                     updates.phone !== undefined
@@ -285,8 +281,8 @@ export const useAuthStore = defineStore("auth", () => {
                     updates.businessName !== undefined
                         ? updates.businessName
                         : user.value.businessName,
-                logo: logoUrl, // Store URL only
-                logoFileId: logoFileId, // Store file ID for deletion
+                logo: logoUrl,
+                logoFileId: logoFileId,
                 whatsapp:
                     updates.whatsapp !== undefined
                         ? updates.whatsapp

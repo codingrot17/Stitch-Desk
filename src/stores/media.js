@@ -1,20 +1,17 @@
-// src/stores/media.js - Updated with Appwrite Storage
+// src/stores/media.js - REIMPLEMENTED: Using profile logo pattern (NO database records)
 import { defineStore } from "pinia";
 import { ref, computed } from "vue";
-import { syncManager } from "@/services/syncManager";
-import { COLLECTIONS } from "@/services/appwrite";
 import {
     uploadMedia,
     deleteFile,
     isStorageUrl,
-    extractFileId,
     getFilePreview
 } from "@/services/storage";
 
 const STORAGE_KEY = "media";
 
 export const useMediaStore = defineStore("media", () => {
-    // State
+    // State - Now we only store metadata in localStorage, files go to Appwrite Storage
     const mediaItems = ref(
         JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]")
     );
@@ -43,32 +40,57 @@ export const useMediaStore = defineStore("media", () => {
         }, {});
     });
 
-    // Actions
+    /**
+     * Get current user ID
+     */
+    function getCurrentUserId() {
+        const user = JSON.parse(localStorage.getItem("user") || "null");
+        return user?.id || null;
+    }
 
     /**
-     * Fetch media from Appwrite (syncs with localStorage)
+     * Generate unique local ID
+     */
+    function generateLocalId() {
+        return `media_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    }
+
+    /**
+     * Fetch media from localStorage (filtered by user)
      */
     async function fetchMedia() {
         loading.value = true;
         error.value = null;
 
         try {
-            const items = await syncManager.fetch(
-                COLLECTIONS.MEDIA,
-                STORAGE_KEY
+            const userId = getCurrentUserId();
+            if (!userId) {
+                console.error("No user ID found");
+                mediaItems.value = [];
+                return [];
+            }
+
+            // Load from localStorage and filter by current user
+            const allMedia = JSON.parse(
+                localStorage.getItem(STORAGE_KEY) || "[]"
             );
-            mediaItems.value = items;
-            return items;
+            const userMedia = allMedia.filter(m => m.userId === userId);
+
+            mediaItems.value = userMedia;
+            console.log(`✅ Loaded ${userMedia.length} media items for user`);
+
+            return userMedia;
         } catch (e) {
             error.value = e.message;
             console.error("Failed to fetch media:", e);
+            return [];
         } finally {
             loading.value = false;
         }
     }
 
     /**
-     * Add new media - WITH APPWRITE STORAGE
+     * Add new media - SIMPLIFIED: Storage + localStorage only
      * @param {File} file - File object from input
      * @param {Object} metadata - Additional metadata
      */
@@ -78,46 +100,79 @@ export const useMediaStore = defineStore("media", () => {
         uploadProgress.value = 0;
 
         try {
-            console.log("📤 Uploading media to Appwrite Storage...");
+            const userId = getCurrentUserId();
+            if (!userId) {
+                throw new Error("User not authenticated");
+            }
 
-            // Upload file to Appwrite Storage
+            console.log("📤 Starting upload...", {
+                name: file.name,
+                size: file.size,
+                type: file.type
+            });
+
+            // Validate file
+            if (!(file instanceof File)) {
+                throw new Error("Invalid file object");
+            }
+
+            if (file.size > 5 * 1024 * 1024) {
+                throw new Error("File must be less than 5MB");
+            }
+
+            if (!file.type.startsWith("image/")) {
+                throw new Error("Only image files are allowed");
+            }
+
+            uploadProgress.value = 10;
+
+            // STEP 1: Upload to Appwrite Storage
+            console.log("☁️ Uploading to storage...");
             const uploadResult = await uploadMedia(file, metadata);
 
-            console.log("✅ Media uploaded:", uploadResult);
+            console.log("✅ Storage upload successful:", {
+                fileId: uploadResult.fileId,
+                url: uploadResult.url
+            });
 
-            // Create media record with Appwrite URL
-            const mediaData = {
+            uploadProgress.value = 70;
+
+            // STEP 2: Save metadata to localStorage (NO DATABASE)
+            const localId = generateLocalId();
+
+            const mediaItem = {
+                id: localId,
+                userId: userId, // Tag with user ID
                 name: metadata.name || file.name,
                 category: metadata.category || "other",
                 customerId: metadata.customerId || "",
                 orderId: metadata.orderId || "",
                 notes: metadata.notes || "",
-                // Storage info
                 url: uploadResult.url,
-                fileId: uploadResult.fileId
-                // Note: fileSize, fileType, fileName removed because
-                // they're not in the database schema
+                fileId: uploadResult.fileId,
+                createdAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString()
             };
 
-            // Save to Appwrite database
-            const result = await syncManager.create(
-                COLLECTIONS.MEDIA,
-                mediaData,
-                STORAGE_KEY
-            );
+            console.log("💾 Saving to localStorage...");
 
-            // Reload from localStorage
-            mediaItems.value = JSON.parse(
+            // Load all media, add new one, save back
+            const allMedia = JSON.parse(
                 localStorage.getItem(STORAGE_KEY) || "[]"
             );
+            allMedia.push(mediaItem);
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(allMedia));
+
+            // Update state
+            mediaItems.value = allMedia.filter(m => m.userId === userId);
 
             uploadProgress.value = 100;
 
-            console.log("✅ Media record created");
-            return result;
+            console.log("✅ Media added successfully:", localId);
+            return mediaItem;
         } catch (e) {
             error.value = e.message;
-            console.error("Failed to add media:", e);
+            console.error("❌ Upload failed:", e);
             throw e;
         } finally {
             loading.value = false;
@@ -128,49 +183,51 @@ export const useMediaStore = defineStore("media", () => {
     }
 
     /**
-     * Add media from base64 (for backward compatibility)
-     * This will still work but stores in Appwrite Storage
-     */
-    async function addMediaFromBase64(base64Data, metadata = {}) {
-        try {
-            // Convert base64 to File object
-            const response = await fetch(base64Data);
-            const blob = await response.blob();
-            const fileName = metadata.name || `media_${Date.now()}.png`;
-            const file = new File([blob], fileName, { type: blob.type });
-
-            // Upload using regular flow
-            return await addMedia(file, metadata);
-        } catch (error) {
-            console.error("Failed to add media from base64:", error);
-            throw error;
-        }
-    }
-
-    /**
-     * Update media metadata (hybrid storage)
+     * Update media metadata (localStorage only)
      */
     async function updateMedia(id, updates) {
         loading.value = true;
         error.value = null;
 
         try {
-            // Don't allow changing URL/fileId
-            const { url, fileId, ...safeUpdates } = updates;
+            const userId = getCurrentUserId();
+            if (!userId) {
+                throw new Error("User not authenticated");
+            }
 
-            const result = await syncManager.update(
-                COLLECTIONS.MEDIA,
-                id,
-                safeUpdates,
-                STORAGE_KEY
-            );
+            // Don't allow changing URL/fileId/userId
+            const { url, fileId, userId: _, ...safeUpdates } = updates;
 
-            // Reload from localStorage
-            mediaItems.value = JSON.parse(
+            console.log("📝 Updating media:", id);
+
+            // Load all media
+            const allMedia = JSON.parse(
                 localStorage.getItem(STORAGE_KEY) || "[]"
             );
 
-            return result;
+            // Find and update
+            const mediaIndex = allMedia.findIndex(
+                m => m.id === id && m.userId === userId
+            );
+
+            if (mediaIndex === -1) {
+                throw new Error("Media not found or access denied");
+            }
+
+            allMedia[mediaIndex] = {
+                ...allMedia[mediaIndex],
+                ...safeUpdates,
+                updatedAt: new Date().toISOString()
+            };
+
+            // Save back
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(allMedia));
+
+            // Update state
+            mediaItems.value = allMedia.filter(m => m.userId === userId);
+
+            console.log("✅ Media updated");
+            return allMedia[mediaIndex];
         } catch (e) {
             error.value = e.message;
             console.error("Failed to update media:", e);
@@ -188,24 +245,42 @@ export const useMediaStore = defineStore("media", () => {
         error.value = null;
 
         try {
-            // Get media item to find fileId
-            const mediaItem = mediaItems.value.find(m => m.id === id);
-
-            if (mediaItem?.fileId) {
-                // Delete file from Appwrite Storage
-                await deleteFile(mediaItem.fileId);
-                console.log("🗑️ Deleted media file from storage");
+            const userId = getCurrentUserId();
+            if (!userId) {
+                throw new Error("User not authenticated");
             }
 
-            // Delete database record
-            await syncManager.delete(COLLECTIONS.MEDIA, id, STORAGE_KEY);
+            console.log("🗑️ Deleting media:", id);
 
-            // Reload from localStorage
-            mediaItems.value = JSON.parse(
+            // Load all media
+            const allMedia = JSON.parse(
                 localStorage.getItem(STORAGE_KEY) || "[]"
             );
 
-            console.log("✅ Media deleted");
+            // Find the item
+            const mediaItem = allMedia.find(
+                m => m.id === id && m.userId === userId
+            );
+
+            if (!mediaItem) {
+                throw new Error("Media not found or access denied");
+            }
+
+            // Delete from Appwrite Storage
+            if (mediaItem.fileId) {
+                console.log("☁️ Deleting from storage:", mediaItem.fileId);
+                await deleteFile(mediaItem.fileId);
+                console.log("✅ Deleted from storage");
+            }
+
+            // Remove from localStorage
+            const filteredMedia = allMedia.filter(m => m.id !== id);
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(filteredMedia));
+
+            // Update state
+            mediaItems.value = filteredMedia.filter(m => m.userId === userId);
+
+            console.log("✅ Media deleted successfully");
             return true;
         } catch (e) {
             error.value = e.message;
@@ -217,21 +292,22 @@ export const useMediaStore = defineStore("media", () => {
     }
 
     /**
-     * Get media by ID (local only)
+     * Get media by ID (must belong to current user)
      */
     function getMediaById(id) {
-        return mediaItems.value.find(m => m.id === id);
+        const userId = getCurrentUserId();
+        return mediaItems.value.find(m => m.id === id && m.userId === userId);
     }
 
     /**
-     * Get media by customer ID (local only)
+     * Get media by customer ID
      */
     function getMediaByCustomer(customerId) {
         return mediaItems.value.filter(m => m.customerId === customerId);
     }
 
     /**
-     * Get media by order ID (local only)
+     * Get media by order ID
      */
     function getMediaByOrder(orderId) {
         return mediaItems.value.filter(m => m.orderId === orderId);
@@ -239,22 +315,15 @@ export const useMediaStore = defineStore("media", () => {
 
     /**
      * Get preview URL for media
-     * @param {string} id - Media ID
-     * @param {number} width - Width in pixels
-     * @param {number} height - Height in pixels
-     * @returns {string|null} - Preview URL
      */
     function getPreviewUrl(id, width = 400, height = 400) {
         const media = getMediaById(id);
         if (!media?.fileId) return null;
-
         return getFilePreview(media.fileId, width, height);
     }
 
     /**
      * Check if media is stored in Appwrite Storage
-     * @param {string} id - Media ID
-     * @returns {boolean}
      */
     function isInStorage(id) {
         const media = getMediaById(id);
@@ -262,31 +331,46 @@ export const useMediaStore = defineStore("media", () => {
     }
 
     /**
-     * Trigger manual sync
+     * Clear all media for current user (useful for debugging)
      */
-    async function syncNow() {
-        await syncManager.syncNow();
-        await fetchMedia();
+    function clearUserMedia() {
+        const userId = getCurrentUserId();
+        if (!userId) return;
+
+        const allMedia = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
+        const otherUsersMedia = allMedia.filter(m => m.userId !== userId);
+
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(otherUsersMedia));
+        mediaItems.value = [];
+
+        console.log("🗑️ Cleared all media for current user");
     }
 
     /**
-     * Migrate old base64 media to Appwrite Storage
-     * Run this once to upgrade existing data
+     * Migrate old base64 media to Appwrite Storage (one-time operation)
      */
-    async function migrateToStorage() {
-        console.log("🔄 Starting media migration to Appwrite Storage...");
+    async function migrateBase64ToStorage() {
+        console.log("🔄 Starting migration...");
+
+        const userId = getCurrentUserId();
+        if (!userId) {
+            throw new Error("User not authenticated");
+        }
 
         let migrated = 0;
         let failed = 0;
 
-        for (const media of mediaItems.value) {
+        const allMedia = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
+        const userMedia = allMedia.filter(m => m.userId === userId);
+
+        for (const media of userMedia) {
             // Skip if already in storage
             if (isStorageUrl(media.url)) {
                 console.log(`⏭️ Skipping ${media.name} - already in storage`);
                 continue;
             }
 
-            // Skip if no valid URL
+            // Skip if no valid base64 data
             if (!media.url || !media.url.startsWith("data:")) {
                 console.log(`⏭️ Skipping ${media.name} - no valid data`);
                 continue;
@@ -298,24 +382,21 @@ export const useMediaStore = defineStore("media", () => {
                 // Convert base64 to File
                 const response = await fetch(media.url);
                 const blob = await response.blob();
-                const file = new File([blob], media.fileName || media.name, {
-                    type: blob.type
-                });
+                const file = new File([blob], media.name, { type: blob.type });
 
                 // Upload to storage
                 const uploadResult = await uploadMedia(file);
 
-                // Update media record
-                await syncManager.update(
-                    COLLECTIONS.MEDIA,
-                    media.id,
-                    {
+                // Update media item in all media
+                const mediaIndex = allMedia.findIndex(m => m.id === media.id);
+                if (mediaIndex !== -1) {
+                    allMedia[mediaIndex] = {
+                        ...allMedia[mediaIndex],
                         url: uploadResult.url,
-                        fileId: uploadResult.fileId
-                        // Removed fileSize, fileType as they're not in schema
-                    },
-                    STORAGE_KEY
-                );
+                        fileId: uploadResult.fileId,
+                        updatedAt: new Date().toISOString()
+                    };
+                }
 
                 migrated++;
                 console.log(`✅ Migrated ${media.name}`);
@@ -325,13 +406,15 @@ export const useMediaStore = defineStore("media", () => {
             }
         }
 
-        // Reload data
+        // Save updated media
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(allMedia));
+
+        // Reload user media
         await fetchMedia();
 
         console.log(
             `✅ Migration complete: ${migrated} migrated, ${failed} failed`
         );
-
         return { migrated, failed };
     }
 
@@ -352,7 +435,6 @@ export const useMediaStore = defineStore("media", () => {
         // Actions
         fetchMedia,
         addMedia,
-        addMediaFromBase64,
         updateMedia,
         deleteMedia,
         getMediaById,
@@ -360,7 +442,7 @@ export const useMediaStore = defineStore("media", () => {
         getMediaByOrder,
         getPreviewUrl,
         isInStorage,
-        syncNow,
-        migrateToStorage
+        clearUserMedia,
+        migrateBase64ToStorage
     };
 });
