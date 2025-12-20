@@ -1,10 +1,11 @@
-// src/services/syncManager.js - Updated with user-scoped data
+// src/services/syncManager.js - Fixed with proper unique ID generation
 import {
     databases,
     isOnline,
     handleAppwriteError,
     DATABASE_ID,
-    createQuery
+    createQuery,
+    ID
 } from "./appwrite";
 import { useToast } from "./toast";
 
@@ -66,7 +67,7 @@ class SyncManager {
     }
 
     /**
-     * CREATE - Add userId to all documents
+     * CREATE - Add userId to all documents WITHOUT pre-generated ID
      */
     async create(collection, data, localStorageKey) {
         const userId = this.getCurrentUserId();
@@ -83,47 +84,68 @@ class SyncManager {
             $updatedAt: new Date().toISOString()
         };
 
-        // Save to localStorage immediately
-        const localData = JSON.parse(
-            localStorage.getItem(localStorageKey) || "[]"
-        );
-        const newItem = {
-            id: Date.now().toString(),
-            ...dataWithUser,
-            _localOnly: true
-        };
-        localData.push(newItem);
-        localStorage.setItem(localStorageKey, JSON.stringify(localData));
-
-        // Try to sync to Appwrite if online
+        // Try to sync to Appwrite FIRST if online
         if (isOnline()) {
             try {
+                console.log(
+                    "📤 Creating document in Appwrite with auto-generated ID"
+                );
+
+                // Let Appwrite generate the ID automatically
                 const response = await databases.createDocument(
                     DATABASE_ID,
                     collection,
-                    "unique()",
+                    ID.unique(), // Let Appwrite generate ID on the fly
                     dataWithUser
                 );
 
-                // Update with Appwrite ID
-                const updatedData = localData.map(item =>
-                    item.id === newItem.id
-                        ? { ...item, id: response.$id, _localOnly: false }
-                        : item
+                console.log("✅ Document created successfully:", response.$id);
+
+                // Now save to localStorage with Appwrite ID
+                const localData = JSON.parse(
+                    localStorage.getItem(localStorageKey) || "[]"
                 );
+
+                const newItem = {
+                    id: response.$id,
+                    ...response,
+                    _localOnly: false
+                };
+
+                localData.push(newItem);
                 localStorage.setItem(
                     localStorageKey,
-                    JSON.stringify(updatedData)
+                    JSON.stringify(localData)
                 );
 
                 return response;
             } catch (error) {
-                console.error("Sync failed, queuing for later:", error);
+                console.error("❌ Sync failed:", error);
+
+                // Save locally with temporary ID and queue
+                const tempId = `temp_${Date.now()}_${Math.random()
+                    .toString(36)
+                    .substr(2, 9)}`;
+                const localData = JSON.parse(
+                    localStorage.getItem(localStorageKey) || "[]"
+                );
+
+                const newItem = {
+                    id: tempId,
+                    ...dataWithUser,
+                    _localOnly: true
+                };
+
+                localData.push(newItem);
+                localStorage.setItem(
+                    localStorageKey,
+                    JSON.stringify(localData)
+                );
 
                 this.addToQueue({
                     operation: "create",
                     collection,
-                    docId: newItem.id,
+                    docId: tempId,
                     data: dataWithUser,
                     localStorageKey
                 });
@@ -132,13 +154,31 @@ class SyncManager {
                 return newItem;
             }
         } else {
+            // Offline: save locally with temporary ID and queue
+            const tempId = `temp_${Date.now()}_${Math.random()
+                .toString(36)
+                .substr(2, 9)}`;
+            const localData = JSON.parse(
+                localStorage.getItem(localStorageKey) || "[]"
+            );
+
+            const newItem = {
+                id: tempId,
+                ...dataWithUser,
+                _localOnly: true
+            };
+
+            localData.push(newItem);
+            localStorage.setItem(localStorageKey, JSON.stringify(localData));
+
             this.addToQueue({
                 operation: "create",
                 collection,
-                docId: newItem.id,
+                docId: tempId,
                 data: dataWithUser,
                 localStorageKey
             });
+
             return newItem;
         }
     }
@@ -318,11 +358,30 @@ class SyncManager {
             try {
                 switch (op.operation) {
                     case "create":
-                        await databases.createDocument(
+                        // For queued creates, let Appwrite generate new ID
+                        const response = await databases.createDocument(
                             DATABASE_ID,
                             op.collection,
-                            op.docId,
+                            ID.unique(), // Generate fresh ID
                             op.data
+                        );
+
+                        // Update localStorage with new Appwrite ID
+                        const localData = JSON.parse(
+                            localStorage.getItem(op.localStorageKey) || "[]"
+                        );
+                        const updatedData = localData.map(item =>
+                            item.id === op.docId
+                                ? {
+                                      ...item,
+                                      id: response.$id,
+                                      _localOnly: false
+                                  }
+                                : item
+                        );
+                        localStorage.setItem(
+                            op.localStorageKey,
+                            JSON.stringify(updatedData)
                         );
                         break;
 

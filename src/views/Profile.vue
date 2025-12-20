@@ -1,5 +1,5 @@
-<script setup>
-import { ref, computed } from 'vue'
+  <script setup>
+import { ref, computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 
@@ -11,7 +11,6 @@ const form = ref({
   email: authStore.user?.email || '',
   phone: authStore.user?.phone || '',
   businessName: authStore.user?.businessName || '',
-  logo: authStore.user?.logo || '',
   whatsapp: authStore.user?.whatsapp || '',
   instagram: authStore.user?.instagram || '',
   facebook: authStore.user?.facebook || '',
@@ -20,57 +19,93 @@ const form = ref({
 })
 
 const success = ref(false)
-const logoPreview = ref(form.value.logo || null)
-const showLogoUpload = ref(false)
+const logoPreview = ref(authStore.user?.logo || null)
+const logoFile = ref(null)
+const logoUploading = ref(false)
+
+// Watch for logo file changes and auto-upload
+watch(logoFile, async (newFile) => {
+  if (!newFile) return
+  
+  logoUploading.value = true
+  try {
+    await authStore.updateProfile({ logoFile: newFile })
+    logoPreview.value = authStore.user.logo
+    logoFile.value = null // Reset file input
+    
+    // Show success message
+    success.value = true
+    setTimeout(() => success.value = false, 3000)
+  } catch (error) {
+    console.error('Failed to upload logo:', error)
+    alert('Failed to upload logo: ' + error.message)
+  } finally {
+    logoUploading.value = false
+  }
+})
 
 // Compute WhatsApp link for testing
 const whatsappLink = computed(() => {
   if (!form.value.whatsapp) return null
-  // Remove any non-digit characters
   const cleanNumber = form.value.whatsapp.replace(/\D/g, '')
   return `https://wa.me/${cleanNumber}`
 })
 
 const handleSubmit = async () => {
   try {
-    await authStore.updateProfile({
-      ...form.value,
-      logo: logoPreview.value
-    })
+    await authStore.updateProfile(form.value)
     success.value = true
     setTimeout(() => success.value = false, 3000)
   } catch (error) {
     console.error('Failed to update profile:', error)
+    alert('Failed to update profile: ' + error.message)
   }
 }
 
 const handleLogoUpload = (event) => {
   const file = event.target.files[0]
-  if (file) {
-    // Validate file size (max 2MB)
-    if (file.size > 2 * 1024 * 1024) {
-      alert('Logo file must be less than 2MB')
-      return
-    }
+  if (!file) return
 
-    // Validate file type
-    if (!file.type.startsWith('image/')) {
-      alert('Please upload an image file')
-      return
-    }
-
-    const reader = new FileReader()
-    reader.onload = (e) => {
-      logoPreview.value = e.target.result
-      form.value.logo = e.target.result
-    }
-    reader.readAsDataURL(file)
+  // Validate file size (max 2MB)
+  if (file.size > 2 * 1024 * 1024) {
+    alert('Logo file must be less than 2MB')
+    event.target.value = ''
+    return
   }
+
+  // Validate file type
+  if (!file.type.startsWith('image/')) {
+    alert('Please upload an image file')
+    event.target.value = ''
+    return
+  }
+
+  // Set the file - watch will handle upload
+  logoFile.value = file
+  
+  // Show preview immediately
+  const reader = new FileReader()
+  reader.onload = (e) => {
+    logoPreview.value = e.target.result
+  }
+  reader.readAsDataURL(file)
 }
 
-const removeLogo = () => {
-  logoPreview.value = null
-  form.value.logo = ''
+const removeLogo = async () => {
+  if (!confirm('Are you sure you want to remove your logo?')) return
+  
+  logoUploading.value = true
+  try {
+    await authStore.updateProfile({ removeLogo: true })
+    logoPreview.value = null
+    success.value = true
+    setTimeout(() => success.value = false, 3000)
+  } catch (error) {
+    console.error('Failed to remove logo:', error)
+    alert('Failed to remove logo: ' + error.message)
+  } finally {
+    logoUploading.value = false
+  }
 }
 
 const handleLogout = () => {
@@ -80,7 +115,6 @@ const handleLogout = () => {
 
 // Format WhatsApp number helper
 const formatWhatsApp = (value) => {
-  // Auto-format as user types
   const digits = value.replace(/\D/g, '')
   if (digits.length <= 3) return digits
   if (digits.length <= 6) return `${digits.slice(0, 3)} ${digits.slice(3)}`
@@ -103,7 +137,7 @@ const onWhatsAppInput = (e) => {
       <div class="card mb-6">
         <div class="flex items-start gap-6 mb-6 pb-6 border-b border-gray-100">
           <!-- Logo or Avatar -->
-          <div class="relative">
+          <div class="relative group">
             <div v-if="logoPreview" class="w-24 h-24 rounded-lg overflow-hidden border-2 border-gray-200">
               <img :src="logoPreview" :alt="form.businessName || 'Logo'" class="w-full h-full object-cover" />
             </div>
@@ -111,13 +145,39 @@ const onWhatsAppInput = (e) => {
               {{ authStore.userInitials }}
             </div>
             
-            <!-- Logo edit button -->
-            <button 
-              @click="showLogoUpload = !showLogoUpload" 
-              class="absolute -bottom-2 -right-2 w-8 h-8 bg-white rounded-full shadow-lg border-2 border-gray-100 flex items-center justify-center hover:bg-gray-50"
+            <!-- Loading overlay -->
+            <div v-if="logoUploading" class="absolute inset-0 bg-black/50 rounded-lg flex items-center justify-center">
+              <svg class="w-8 h-8 text-white animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+            </div>
+            
+            <!-- Edit button with pencil icon -->
+            <label 
+              :class="['absolute -bottom-2 -right-2 w-10 h-10 bg-white rounded-full shadow-lg border-2 border-gray-100 flex items-center justify-center cursor-pointer hover:bg-gray-50 transition-colors', logoUploading && 'opacity-50 cursor-not-allowed']"
+              :title="logoPreview ? 'Change logo' : 'Upload logo'"
             >
-              <svg class="w-4 h-4 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <input 
+                type="file" 
+                accept="image/*" 
+                @change="handleLogoUpload" 
+                class="hidden"
+                :disabled="logoUploading"
+              />
+              <svg class="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+              </svg>
+            </label>
+            
+            <!-- Remove button (only when logo exists) -->
+            <button 
+              v-if="logoPreview && !logoUploading"
+              @click="removeLogo"
+              class="absolute -top-2 -right-2 w-8 h-8 bg-red-500 rounded-full shadow-lg flex items-center justify-center hover:bg-red-600 transition-colors"
+              title="Remove logo"
+            >
+              <svg class="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
               </svg>
             </button>
           </div>
@@ -129,23 +189,6 @@ const onWhatsAppInput = (e) => {
             <span class="inline-block mt-2 px-3 py-1 bg-primary-100 text-primary-700 text-sm font-medium rounded-full capitalize">
               {{ authStore.user?.role || 'Admin' }}
             </span>
-          </div>
-        </div>
-
-        <!-- Logo Upload Section -->
-        <div v-if="showLogoUpload" class="mb-6 p-4 bg-gray-50 rounded-lg">
-          <label class="label">Brand Logo</label>
-          <div class="space-y-3">
-            <input
-              type="file"
-              accept="image/*"
-              @change="handleLogoUpload"
-              class="input-field file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:bg-primary-50 file:text-primary-600 file:font-medium hover:file:bg-primary-100"
-            />
-            <button v-if="logoPreview" @click="removeLogo" class="btn-ghost text-sm text-red-600 hover:bg-red-50">
-              Remove Logo
-            </button>
-            <p class="text-xs text-gray-500">Recommended: Square image, max 2MB</p>
           </div>
         </div>
 
@@ -270,8 +313,8 @@ const onWhatsAppInput = (e) => {
             </div>
           </div>
 
-          <button type="submit" class="btn-primary w-full">
-            Save Changes
+          <button type="submit" :disabled="authStore.loading" class="btn-primary w-full disabled:opacity-50">
+            {{ authStore.loading ? 'Saving...' : 'Save Changes' }}
           </button>
         </form>
       </div>
@@ -286,25 +329,29 @@ const onWhatsAppInput = (e) => {
         </button>
       </div>
 
-      <div class="lg:hidden mt-8">
+      <!-- Quick Links Cards -->
+      <div class="mt-6">
+        <h3 class="font-semibold text-gray-900 mb-4">Quick Links</h3>
         <div class="grid grid-cols-3 gap-3">
-          <router-link to="/measurements" class="card text-center py-4">
-            <svg class="w-6 h-6 mx-auto mb-2 text-primary-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 5a1 1 0 011-1h14a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1V5z" />
+          <router-link to="/measurements" class="card text-center py-6 hover:shadow-md transition-shadow">
+            <svg class="w-8 h-8 mx-auto mb-3 text-primary-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 5a1 1 0 011-1h14a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM4 13a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H5a1 1 0 01-1-1v-6z" />
             </svg>
-            <span class="text-xs text-gray-600">Measurements</span>
+            <span class="text-sm font-medium text-gray-700">Measurements</span>
           </router-link>
-          <router-link to="/inventory" class="card text-center py-4">
-            <svg class="w-6 h-6 mx-auto mb-2 text-primary-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          
+          <router-link to="/inventory" class="card text-center py-6 hover:shadow-md transition-shadow">
+            <svg class="w-8 h-8 mx-auto mb-3 text-primary-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
             </svg>
-            <span class="text-xs text-gray-600">Inventory</span>
+            <span class="text-sm font-medium text-gray-700">Inventory</span>
           </router-link>
-          <router-link to="/media" class="card text-center py-4">
-            <svg class="w-6 h-6 mx-auto mb-2 text-primary-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          
+          <router-link to="/media" class="card text-center py-6 hover:shadow-md transition-shadow">
+            <svg class="w-8 h-8 mx-auto mb-3 text-primary-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
             </svg>
-            <span class="text-xs text-gray-600">Media</span>
+            <span class="text-sm font-medium text-gray-700">Media</span>
           </router-link>
         </div>
       </div>

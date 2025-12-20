@@ -1,8 +1,8 @@
-// src/stores/auth.js - Fixed with logo upload to storage
+// src/stores/auth.js - Fixed with proper logo handling via Storage
 import { defineStore } from "pinia";
 import { ref, computed } from "vue";
 import { account } from "@/services/appwrite";
-import { uploadLogo, deleteFile, extractFileId, isStorageUrl } from "@/services/storage";
+import { uploadLogo, deleteFile, isStorageUrl } from "@/services/storage";
 
 export const useAuthStore = defineStore("auth", () => {
     const user = ref(JSON.parse(localStorage.getItem("user")) || null);
@@ -37,8 +37,8 @@ export const useAuthStore = defineStore("auth", () => {
                 role: "tailor",
                 phone: prefs.phone || "",
                 businessName: prefs.businessName || "",
-                logo: prefs.logo || "", // This is now a URL from storage
-                logoFileId: prefs.logoFileId || "", // NEW: Track file ID
+                logo: prefs.logo || "",
+                logoFileId: prefs.logoFileId || "",
                 whatsapp: prefs.whatsapp || "",
                 instagram: prefs.instagram || "",
                 facebook: prefs.facebook || "",
@@ -236,7 +236,11 @@ export const useAuthStore = defineStore("auth", () => {
         error.value = null;
 
         try {
-            console.log("🔄 Updating profile...", updates);
+            console.log("🔄 Updating profile...", {
+                ...updates,
+                logoFile: updates.logoFile ? "FILE_OBJECT" : undefined,
+                logo: updates.logo ? "URL_STRING" : undefined
+            });
 
             // Update name if changed
             if (updates.name && updates.name !== user.value.name) {
@@ -250,7 +254,7 @@ export const useAuthStore = defineStore("auth", () => {
             if (updates.logoFile) {
                 // NEW LOGO: Upload new file
                 console.log("📤 Uploading new logo...");
-                
+
                 // Delete old logo if exists
                 if (logoFileId) {
                     await deleteFile(logoFileId);
@@ -261,37 +265,48 @@ export const useAuthStore = defineStore("auth", () => {
                 const uploadResult = await uploadLogo(updates.logoFile);
                 logoUrl = uploadResult.url;
                 logoFileId = uploadResult.fileId;
-                
+
                 console.log("✅ Logo uploaded:", logoUrl);
-            } else if (updates.logo === "" && logoFileId) {
+            } else if (updates.removeLogo && logoFileId) {
                 // LOGO REMOVED: Delete from storage
                 console.log("🗑️ Removing logo...");
                 await deleteFile(logoFileId);
                 logoUrl = "";
                 logoFileId = "";
-            } else if (updates.logo && updates.logo !== user.value.logo) {
-                // Logo URL changed (shouldn't happen, but handle it)
-                logoUrl = updates.logo;
-            } else {
-                // No change to logo
-                logoUrl = user.value.logo;
-                logoFileId = user.value.logoFileId;
             }
 
-            // Prepare preferences object - IMPORTANT: No base64 data!
+            // Prepare preferences object - ONLY URLs, NO BASE64!
             const prefsToUpdate = {
-                phone: updates.phone || "",
-                businessName: updates.businessName || "",
+                phone:
+                    updates.phone !== undefined
+                        ? updates.phone
+                        : user.value.phone,
+                businessName:
+                    updates.businessName !== undefined
+                        ? updates.businessName
+                        : user.value.businessName,
                 logo: logoUrl, // Store URL only
                 logoFileId: logoFileId, // Store file ID for deletion
-                whatsapp: updates.whatsapp || "",
-                instagram: updates.instagram || "",
-                facebook: updates.facebook || "",
-                twitter: updates.twitter || "",
-                bio: updates.bio || ""
+                whatsapp:
+                    updates.whatsapp !== undefined
+                        ? updates.whatsapp
+                        : user.value.whatsapp,
+                instagram:
+                    updates.instagram !== undefined
+                        ? updates.instagram
+                        : user.value.instagram,
+                facebook:
+                    updates.facebook !== undefined
+                        ? updates.facebook
+                        : user.value.facebook,
+                twitter:
+                    updates.twitter !== undefined
+                        ? updates.twitter
+                        : user.value.twitter,
+                bio: updates.bio !== undefined ? updates.bio : user.value.bio
             };
 
-            console.log("💾 Updating preferences...", prefsToUpdate);
+            console.log("💾 Updating preferences...");
 
             // Update preferences
             await account.updatePrefs(prefsToUpdate);

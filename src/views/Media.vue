@@ -1,4 +1,4 @@
-<!-- src/views/Media.vue - Fixed with proper file handling -->
+  <!-- src/views/Media.vue - Fixed with proper file handling -->
 <script setup>
 import { ref, computed } from 'vue'
 import { useMediaStore } from '@/stores/media'
@@ -15,7 +15,7 @@ const selectedMedia = ref(null)
 const filterCategory = ref('all')
 const selectedFile = ref(null)
 const uploadPreview = ref(null)
-const fileInputKey = ref(0) // KEY: Force file input refresh
+const fileInputRef = ref(null)
 
 const form = ref({
   name: '',
@@ -34,8 +34,14 @@ const openAddModal = () => {
   form.value = { name: '', category: 'fabric-sample', customerId: '', notes: '' }
   selectedFile.value = null
   uploadPreview.value = null
-  fileInputKey.value++ // Force file input reset
   showModal.value = true
+  
+  // Reset file input after modal opens
+  setTimeout(() => {
+    if (fileInputRef.value) {
+      fileInputRef.value.value = ''
+    }
+  }, 100)
 }
 
 const handleSubmit = async () => {
@@ -66,11 +72,15 @@ const handleSubmit = async () => {
     
     console.log('✅ Upload successful!')
     
-    // Reset modal state
+    // Close modal and reset state
     showModal.value = false
     selectedFile.value = null
     uploadPreview.value = null
-    fileInputKey.value++ // Reset file input for next upload
+    
+    // Reset file input
+    if (fileInputRef.value) {
+      fileInputRef.value.value = ''
+    }
   } catch (error) {
     console.error('❌ Upload error:', error)
     alert('Upload failed: ' + error.message)
@@ -120,16 +130,14 @@ const handleFileSelect = (event) => {
   // Validate file size (5MB max)
   if (file.size > 5 * 1024 * 1024) {
     alert('File must be less than 5MB')
-    event.target.value = '' // Clear input
-    fileInputKey.value++ // Reset input
+    event.target.value = ''
     return
   }
 
   // Validate file type
   if (!file.type.startsWith('image/')) {
     alert('Please upload an image file')
-    event.target.value = '' // Clear input
-    fileInputKey.value++ // Reset input
+    event.target.value = ''
     return
   }
 
@@ -254,7 +262,7 @@ const formatFileSize = (bytes) => {
         <div>
           <label class="label">Upload Image</label>
           <input
-            :key="fileInputKey"
+            ref="fileInputRef"
             type="file"
             accept="image/*"
             @change="handleFileSelect"

@@ -1,4 +1,4 @@
-// src/services/storage.js - Appwrite Storage Service
+// src/services/storage.js - Fixed Appwrite Storage Service
 import { storage, MEDIA_BUCKET_ID, ID } from "./appwrite";
 
 // Get project ID from environment or config
@@ -29,6 +29,9 @@ export async function uploadFile(file, folder = "uploads") {
         // Create unique file ID
         const fileId = ID.unique();
 
+        console.log("Generated file ID:", fileId);
+        console.log("Using bucket ID:", MEDIA_BUCKET_ID);
+
         // Upload to Appwrite Storage
         // IMPORTANT: Appwrite expects the file as the third parameter
         const response = await storage.createFile(
@@ -38,9 +41,9 @@ export async function uploadFile(file, folder = "uploads") {
             [] // permissions - empty array for default bucket permissions
         );
 
+        console.log("📦 Upload response:", response);
+
         // Get file URL - Build the complete view URL
-        // Appwrite SDK's getFileView returns a URL object, but sometimes .href is undefined
-        // So we build the URL manually to be safe
         const urlString = `https://cloud.appwrite.io/v1/storage/buckets/${MEDIA_BUCKET_ID}/files/${response.$id}/view?project=${APPWRITE_PROJECT_ID}`;
 
         console.log("✅ File uploaded:", urlString);
@@ -53,7 +56,13 @@ export async function uploadFile(file, folder = "uploads") {
             type: file.type || "unknown"
         };
     } catch (error) {
-        console.error("Failed to upload file:", error);
+        console.error("❌ Failed to upload file:", error);
+        console.error("Error details:", {
+            message: error.message,
+            code: error.code,
+            type: error.type,
+            response: error.response
+        });
         throw new Error(error.message || "File upload failed");
     }
 }
@@ -66,6 +75,8 @@ export async function uploadFile(file, folder = "uploads") {
 export async function deleteFile(fileId) {
     try {
         if (!fileId) return false;
+
+        console.log("🗑️ Deleting file:", fileId);
 
         await storage.deleteFile(MEDIA_BUCKET_ID, fileId);
         console.log("✅ File deleted:", fileId);
@@ -118,6 +129,8 @@ export function getFileDownload(fileId) {
  */
 export async function uploadLogo(file) {
     try {
+        console.log("🖼️ Uploading logo...");
+
         // Validate logo requirements
         if (file.size > 2 * 1024 * 1024) {
             throw new Error("Logo must be less than 2MB");
@@ -130,6 +143,7 @@ export async function uploadLogo(file) {
         // Upload with 'logos' folder prefix
         const result = await uploadFile(file, "logos");
 
+        console.log("✅ Logo uploaded successfully");
         return result;
     } catch (error) {
         console.error("Logo upload failed:", error);
@@ -145,12 +159,16 @@ export async function uploadLogo(file) {
  */
 export async function uploadMedia(file, metadata = {}) {
     try {
+        console.log("📸 Uploading media file...");
+
         // Validate media file
         if (file.size > 5 * 1024 * 1024) {
             throw new Error("Media file must be less than 5MB");
         }
 
         const result = await uploadFile(file, "media");
+
+        console.log("✅ Media uploaded successfully");
 
         return {
             ...result,
