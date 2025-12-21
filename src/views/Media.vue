@@ -1,4 +1,4 @@
-<!-- src/views/Media.vue - UPDATED: Multiple file upload support -->
+<!-- src/views/Media.vue - UPDATED: Album view for batch uploads -->
 <script setup>
 import { ref, computed } from 'vue'
 import { useMediaStore } from '@/stores/media'
@@ -10,25 +10,26 @@ const mediaStore = useMediaStore()
 const customersStore = useCustomersStore()
 
 const showModal = ref(false)
-const showPreview = ref(false)
-const selectedMedia = ref(null)
+const showAlbumView = ref(false)
+const selectedAlbum = ref(null)
 const filterCategory = ref('all')
-const selectedFiles = ref([]) // Changed: Now array of files
-const uploadPreviews = ref([]) // Changed: Array of previews
+const selectedFiles = ref([])
+const uploadPreviews = ref([])
 const fileInputRef = ref(null)
 const uploadingCount = ref(0)
 const uploadedCount = ref(0)
 const totalFiles = ref(0)
 
 const form = ref({
+  albumName: '',
   category: 'fabric-sample',
   customerId: '',
   notes: ''
 })
 
-const filteredMedia = computed(() => {
-  if (filterCategory.value === 'all') return mediaStore.mediaItems
-  return mediaStore.mediaItems.filter(m => m.category === filterCategory.value)
+const filteredAlbums = computed(() => {
+  if (filterCategory.value === 'all') return mediaStore.albums
+  return mediaStore.albums.filter(a => a.category === filterCategory.value)
 })
 
 const isUploading = computed(() => uploadingCount.value > 0)
@@ -39,8 +40,7 @@ const uploadProgressText = computed(() => {
 })
 
 const openAddModal = () => {
-  // Reset everything
-  form.value = { category: 'fabric-sample', customerId: '', notes: '' }
+  form.value = { albumName: '', category: 'fabric-sample', customerId: '', notes: '' }
   selectedFiles.value = []
   uploadPreviews.value = []
   uploadingCount.value = 0
@@ -48,7 +48,6 @@ const openAddModal = () => {
   totalFiles.value = 0
   showModal.value = true
   
-  // Reset file input
   setTimeout(() => {
     if (fileInputRef.value) {
       fileInputRef.value.value = ''
@@ -69,7 +68,14 @@ const handleSubmit = async () => {
     uploadingCount.value = selectedFiles.value.length
     uploadedCount.value = 0
     
-    // Upload files sequentially to avoid overwhelming the system
+    // Generate album ID for batch upload
+    const albumId = mediaStore.generateAlbumId()
+    const albumName = form.value.albumName || `Album ${new Date().toLocaleDateString()}`
+    const createdAt = new Date().toISOString()
+    
+    console.log(`📁 Creating album: ${albumName} (${albumId})`)
+    
+    // Upload all files with same albumId
     for (let i = 0; i < selectedFiles.value.length; i++) {
       const file = selectedFiles.value[i]
       
@@ -77,10 +83,13 @@ const handleSubmit = async () => {
       
       try {
         await mediaStore.addMedia(file, {
-          name: file.name.split('.')[0], // Use filename without extension
+          albumId: albumId,
+          albumName: albumName,
+          name: file.name.split('.')[0],
           category: form.value.category,
           customerId: form.value.customerId,
-          notes: form.value.notes
+          notes: form.value.notes,
+          createdAt: createdAt
         })
         
         uploadedCount.value++
@@ -93,7 +102,7 @@ const handleSubmit = async () => {
       uploadingCount.value--
     }
     
-    console.log(`✅ Batch upload complete! ${uploadedCount.value}/${totalFiles.value} succeeded`)
+    console.log(`✅ Album created! ${uploadedCount.value}/${totalFiles.value} files uploaded`)
     
     // Close modal and reset
     showModal.value = false
@@ -103,7 +112,6 @@ const handleSubmit = async () => {
     uploadedCount.value = 0
     totalFiles.value = 0
     
-    // Reset file input
     if (fileInputRef.value) {
       fileInputRef.value.value = ''
     }
@@ -113,20 +121,41 @@ const handleSubmit = async () => {
   }
 }
 
-const handleDelete = async (id) => {
-  if (confirm('Are you sure you want to delete this item? This will also remove the file from storage.')) {
+const openAlbumView = (album) => {
+  selectedAlbum.value = album
+  showAlbumView.value = true
+}
+
+const handleDeleteAlbum = async (albumId) => {
+  const album = mediaStore.getAlbumById(albumId)
+  const itemCount = album.items.length
+  
+  if (confirm(`Delete this ${itemCount > 1 ? `album with ${itemCount} images` : 'image'}? This will remove all files from storage.`)) {
     try {
-      await mediaStore.deleteMedia(id)
-      showPreview.value = false
+      await mediaStore.deleteAlbum(albumId)
+      showAlbumView.value = false
     } catch (error) {
       alert('Delete failed: ' + error.message)
     }
   }
 }
 
-const openPreview = (media) => {
-  selectedMedia.value = media
-  showPreview.value = true
+const handleDeleteSingleImage = async (id) => {
+  if (confirm('Delete this image? This will remove it from storage.')) {
+    try {
+      await mediaStore.deleteMedia(id)
+      
+      // If this was the last item in album, close the view
+      if (selectedAlbum.value && selectedAlbum.value.items.length <= 1) {
+        showAlbumView.value = false
+      } else {
+        // Refresh album data
+        selectedAlbum.value = mediaStore.getAlbumById(selectedAlbum.value.albumId)
+      }
+    } catch (error) {
+      alert('Delete failed: ' + error.message)
+    }
+  }
 }
 
 const getCustomerName = (customerId) => {
@@ -147,7 +176,7 @@ const getCategoryLabel = (category) => {
 }
 
 const handleFileSelect = (event) => {
-  const files = Array.from(event.target.files) // Convert FileList to Array
+  const files = Array.from(event.target.files)
   if (files.length === 0) {
     console.log('No files selected')
     return
@@ -155,18 +184,15 @@ const handleFileSelect = (event) => {
 
   console.log(`📷 ${files.length} file(s) selected`)
 
-  // Validate all files
   const validFiles = []
   const errors = []
 
   for (const file of files) {
-    // Validate file size (5MB max)
     if (file.size > 5 * 1024 * 1024) {
       errors.push(`${file.name}: File too large (max 5MB)`)
       continue
     }
 
-    // Validate file type
     if (!file.type.startsWith('image/')) {
       errors.push(`${file.name}: Not an image file`)
       continue
@@ -175,7 +201,6 @@ const handleFileSelect = (event) => {
     validFiles.push(file)
   }
 
-  // Show errors if any
   if (errors.length > 0) {
     alert('Some files were skipped:\n' + errors.join('\n'))
   }
@@ -185,14 +210,12 @@ const handleFileSelect = (event) => {
     return
   }
 
-  // Store valid files
   selectedFiles.value = validFiles
   uploadPreviews.value = []
 
   console.log(`✅ ${validFiles.length} valid file(s) ready for upload`)
 
-  // Generate previews for all valid files
-  validFiles.forEach((file, index) => {
+  validFiles.forEach((file) => {
     const reader = new FileReader()
     reader.onload = (e) => {
       uploadPreviews.value.push({
@@ -266,39 +289,53 @@ const formatFileSize = (bytes) => {
       </button>
     </div>
 
-    <div v-if="filteredMedia.length" class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
+    <!-- Album Grid -->
+    <div v-if="filteredAlbums.length" class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
       <div
-        v-for="media in filteredMedia"
-        :key="media.id"
-        @click="openPreview(media)"
+        v-for="album in filteredAlbums"
+        :key="album.albumId"
+        @click="openAlbumView(album)"
         class="group cursor-pointer"
       >
         <div class="aspect-square bg-gray-100 rounded-lg overflow-hidden relative">
+          <!-- Main Image (first item) -->
           <img
-            v-if="media.url"
-            :src="media.url"
-            :alt="media.name"
+            v-if="album.items[0]?.url"
+            :src="album.items[0].url"
+            :alt="album.name"
             class="w-full h-full object-cover group-hover:scale-105 transition-transform duration-200"
             loading="lazy"
           />
-          <div v-else class="w-full h-full flex items-center justify-center">
-            <svg class="w-12 h-12 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
-            </svg>
+          
+          <!-- Multiple Images Indicator -->
+          <div v-if="album.items.length > 1" class="absolute top-2 right-2 flex items-center gap-1">
+            <div class="bg-black/70 text-white px-2 py-1 rounded-full text-xs font-medium flex items-center gap-1">
+              <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+              </svg>
+              {{ album.items.length }}
+            </div>
           </div>
-          <!-- Cloud icon for storage items -->
-          <div v-if="mediaStore.isInStorage(media.id)" class="absolute top-2 right-2 w-6 h-6 bg-white/90 rounded-full flex items-center justify-center">
+          
+          <!-- Cloud Storage Badge -->
+          <div v-if="mediaStore.isInStorage(album.items[0].id)" class="absolute top-2 left-2 w-6 h-6 bg-white/90 rounded-full flex items-center justify-center">
             <svg class="w-4 h-4 text-primary-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 10-9.78 2.096A4.001 4.001 0 003 15z" />
             </svg>
           </div>
+          
+          <!-- Album Name Overlay -->
           <div class="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-end p-3">
-            <span class="text-white text-sm font-medium truncate">{{ media.name }}</span>
+            <span class="text-white text-sm font-medium truncate">{{ album.name }}</span>
           </div>
         </div>
+        
         <div class="mt-2">
-          <p class="text-sm font-medium text-gray-900 truncate">{{ media.name }}</p>
-          <p class="text-xs text-gray-500">{{ getCategoryLabel(media.category) }}</p>
+          <p class="text-sm font-medium text-gray-900 truncate">{{ album.name }}</p>
+          <p class="text-xs text-gray-500">
+            {{ getCategoryLabel(album.category) }}
+            <span v-if="album.items.length > 1"> • {{ album.items.length }} images</span>
+          </p>
         </div>
       </div>
     </div>
@@ -316,6 +353,17 @@ const formatFileSize = (bytes) => {
     <Modal :show="showModal" title="Upload Media" @close="showModal = false">
       <form @submit.prevent="handleSubmit" class="space-y-4">
         <div>
+          <label class="label">Album Name (optional)</label>
+          <input
+            v-model="form.albumName"
+            type="text"
+            class="input-field"
+            placeholder="e.g., Wedding Dress Fabrics"
+          />
+          <p class="text-xs text-gray-500 mt-1">Leave blank to auto-generate name</p>
+        </div>
+        
+        <div>
           <label class="label">Select Images (multiple allowed)</label>
           <input
             ref="fileInputRef"
@@ -328,7 +376,7 @@ const formatFileSize = (bytes) => {
           <p class="text-xs text-gray-500 mt-1">Max file size: 5MB per file</p>
         </div>
         
-        <!-- Preview Grid for Multiple Files -->
+        <!-- Preview Grid -->
         <div v-if="uploadPreviews.length > 0" class="space-y-3">
           <p class="text-sm font-medium text-gray-700">
             {{ selectedFiles.length }} file(s) selected
@@ -356,7 +404,7 @@ const formatFileSize = (bytes) => {
                 </svg>
               </button>
               
-              <!-- File info overlay -->
+              <!-- File info -->
               <div class="absolute bottom-0 left-0 right-0 bg-black/70 text-white p-2 text-xs">
                 <p class="truncate font-medium">{{ preview.name }}</p>
                 <p class="text-gray-300">{{ formatFileSize(preview.size) }}</p>
@@ -406,34 +454,69 @@ const formatFileSize = (bytes) => {
       </form>
     </Modal>
 
-    <!-- Preview Modal -->
-    <Modal :show="showPreview" :title="selectedMedia?.name || 'Preview'" size="lg" @close="showPreview = false">
-      <div v-if="selectedMedia" class="space-y-4">
-        <div class="aspect-video bg-gray-100 rounded-lg overflow-hidden">
-          <img :src="selectedMedia.url" :alt="selectedMedia.name" class="w-full h-full object-contain" />
-        </div>
-        
-        <div class="grid grid-cols-2 gap-4 text-sm">
+    <!-- Album View Modal -->
+    <Modal :show="showAlbumView" :title="selectedAlbum?.name || 'Album'" size="xl" @close="showAlbumView = false">
+      <div v-if="selectedAlbum" class="space-y-4">
+        <!-- Album Info -->
+        <div class="grid grid-cols-2 gap-4 text-sm pb-4 border-b border-gray-100">
           <div>
             <span class="text-gray-500">Category:</span>
-            <span class="ml-2 font-medium">{{ getCategoryLabel(selectedMedia.category) }}</span>
+            <span class="ml-2 font-medium">{{ getCategoryLabel(selectedAlbum.category) }}</span>
           </div>
-          <div v-if="getCustomerName(selectedMedia.customerId)">
+          <div v-if="getCustomerName(selectedAlbum.customerId)">
             <span class="text-gray-500">Customer:</span>
-            <span class="ml-2 font-medium">{{ getCustomerName(selectedMedia.customerId) }}</span>
+            <span class="ml-2 font-medium">{{ getCustomerName(selectedAlbum.customerId) }}</span>
           </div>
           <div>
-            <span class="text-gray-500">Storage:</span>
-            <span class="ml-2 font-medium">
-              {{ mediaStore.isInStorage(selectedMedia.id) ? '☁️ Cloud' : '💾 Local' }}
-            </span>
+            <span class="text-gray-500">Images:</span>
+            <span class="ml-2 font-medium">{{ selectedAlbum.items.length }}</span>
+          </div>
+          <div>
+            <span class="text-gray-500">Created:</span>
+            <span class="ml-2 font-medium">{{ new Date(selectedAlbum.createdAt).toLocaleDateString() }}</span>
           </div>
         </div>
         
-        <p v-if="selectedMedia.notes" class="text-gray-600">{{ selectedMedia.notes }}</p>
+        <p v-if="selectedAlbum.notes" class="text-gray-600 pb-4 border-b border-gray-100">{{ selectedAlbum.notes }}</p>
         
-        <button @click="handleDelete(selectedMedia.id)" class="btn-ghost w-full text-red-600 hover:bg-red-50">
-          Delete Media
+        <!-- Image Grid -->
+        <div class="grid grid-cols-2 sm:grid-cols-3 gap-3 max-h-96 overflow-y-auto">
+          <div 
+            v-for="item in selectedAlbum.items" 
+            :key="item.id"
+            class="relative group"
+          >
+            <div class="aspect-square bg-gray-100 rounded-lg overflow-hidden">
+              <img 
+                :src="item.url" 
+                :alt="item.name" 
+                class="w-full h-full object-cover cursor-pointer hover:scale-110 transition-transform"
+                @click="window.open(item.url, '_blank')"
+              />
+            </div>
+            
+            <!-- Delete individual image button -->
+            <button
+              v-if="selectedAlbum.items.length > 1"
+              @click.stop="handleDeleteSingleImage(item.id)"
+              class="absolute top-2 right-2 w-7 h-7 bg-red-500 rounded-full flex items-center justify-center hover:bg-red-600 transition-colors shadow-lg opacity-0 group-hover:opacity-100"
+              title="Delete image"
+            >
+              <svg class="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+            
+            <p class="text-xs text-gray-500 mt-1 truncate">{{ item.name }}</p>
+          </div>
+        </div>
+        
+        <!-- Delete Album Button -->
+        <button 
+          @click="handleDeleteAlbum(selectedAlbum.albumId)" 
+          class="btn-ghost w-full text-red-600 hover:bg-red-50 mt-4"
+        >
+          Delete {{ selectedAlbum.items.length > 1 ? 'Album' : 'Image' }}
         </button>
       </div>
     </Modal>

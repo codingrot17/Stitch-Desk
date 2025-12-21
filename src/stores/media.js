@@ -1,4 +1,4 @@
-// src/stores/media.js - REIMPLEMENTED: Using profile logo pattern (NO database records)
+// src/stores/media.js - UPDATED: Album support for batch uploads
 import { defineStore } from "pinia";
 import { ref, computed } from "vue";
 import {
@@ -11,7 +11,7 @@ import {
 const STORAGE_KEY = "media";
 
 export const useMediaStore = defineStore("media", () => {
-    // State - Now we only store metadata in localStorage, files go to Appwrite Storage
+    // State
     const mediaItems = ref(
         JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]")
     );
@@ -31,10 +31,38 @@ export const useMediaStore = defineStore("media", () => {
     // Computed properties
     const totalMedia = computed(() => mediaItems.value.length);
 
+    // Group media by albumId
+    const albums = computed(() => {
+        const grouped = {};
+
+        mediaItems.value.forEach(item => {
+            const albumId = item.albumId || item.id; // Single items use their own ID
+
+            if (!grouped[albumId]) {
+                grouped[albumId] = {
+                    id: albumId,
+                    albumId: albumId,
+                    name: item.albumName || item.name,
+                    category: item.category,
+                    customerId: item.customerId,
+                    orderId: item.orderId,
+                    notes: item.notes,
+                    userId: item.userId,
+                    createdAt: item.createdAt,
+                    items: []
+                };
+            }
+
+            grouped[albumId].items.push(item);
+        });
+
+        return Object.values(grouped);
+    });
+
     const mediaByCategory = computed(() => {
         return categories.reduce((acc, category) => {
-            acc[category] = mediaItems.value.filter(
-                item => item.category === category
+            acc[category] = albums.value.filter(
+                album => album.category === category
             );
             return acc;
         }, {});
@@ -56,6 +84,13 @@ export const useMediaStore = defineStore("media", () => {
     }
 
     /**
+     * Generate unique album ID
+     */
+    function generateAlbumId() {
+        return `album_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    }
+
+    /**
      * Fetch media from localStorage (filtered by user)
      */
     async function fetchMedia() {
@@ -70,7 +105,6 @@ export const useMediaStore = defineStore("media", () => {
                 return [];
             }
 
-            // Load from localStorage and filter by current user
             const allMedia = JSON.parse(
                 localStorage.getItem(STORAGE_KEY) || "[]"
             );
@@ -90,9 +124,9 @@ export const useMediaStore = defineStore("media", () => {
     }
 
     /**
-     * Add new media - SIMPLIFIED: Storage + localStorage only
+     * Add new media - UPDATED: Support for batch uploads with albumId
      * @param {File} file - File object from input
-     * @param {Object} metadata - Additional metadata
+     * @param {Object} metadata - Additional metadata including albumId
      */
     async function addMedia(file, metadata = {}) {
         loading.value = true;
@@ -108,7 +142,8 @@ export const useMediaStore = defineStore("media", () => {
             console.log("📤 Starting upload...", {
                 name: file.name,
                 size: file.size,
-                type: file.type
+                type: file.type,
+                albumId: metadata.albumId || "none"
             });
 
             // Validate file
@@ -126,7 +161,7 @@ export const useMediaStore = defineStore("media", () => {
 
             uploadProgress.value = 10;
 
-            // STEP 1: Upload to Appwrite Storage
+            // Upload to Appwrite Storage
             console.log("☁️ Uploading to storage...");
             const uploadResult = await uploadMedia(file, metadata);
 
@@ -137,12 +172,14 @@ export const useMediaStore = defineStore("media", () => {
 
             uploadProgress.value = 70;
 
-            // STEP 2: Save metadata to localStorage (NO DATABASE)
+            // Save metadata to localStorage
             const localId = generateLocalId();
 
             const mediaItem = {
                 id: localId,
-                userId: userId, // Tag with user ID
+                userId: userId,
+                albumId: metadata.albumId || localId, // Use albumId for batch, or own ID for single
+                albumName: metadata.albumName || metadata.name || file.name,
                 name: metadata.name || file.name,
                 category: metadata.category || "other",
                 customerId: metadata.customerId || "",
@@ -150,13 +187,12 @@ export const useMediaStore = defineStore("media", () => {
                 notes: metadata.notes || "",
                 url: uploadResult.url,
                 fileId: uploadResult.fileId,
-                createdAt: new Date().toISOString(),
+                createdAt: metadata.createdAt || new Date().toISOString(),
                 updatedAt: new Date().toISOString()
             };
 
             console.log("💾 Saving to localStorage...");
 
-            // Load all media, add new one, save back
             const allMedia = JSON.parse(
                 localStorage.getItem(STORAGE_KEY) || "[]"
             );
@@ -195,17 +231,14 @@ export const useMediaStore = defineStore("media", () => {
                 throw new Error("User not authenticated");
             }
 
-            // Don't allow changing URL/fileId/userId
             const { url, fileId, userId: _, ...safeUpdates } = updates;
 
             console.log("📝 Updating media:", id);
 
-            // Load all media
             const allMedia = JSON.parse(
                 localStorage.getItem(STORAGE_KEY) || "[]"
             );
 
-            // Find and update
             const mediaIndex = allMedia.findIndex(
                 m => m.id === id && m.userId === userId
             );
@@ -220,10 +253,7 @@ export const useMediaStore = defineStore("media", () => {
                 updatedAt: new Date().toISOString()
             };
 
-            // Save back
             localStorage.setItem(STORAGE_KEY, JSON.stringify(allMedia));
-
-            // Update state
             mediaItems.value = allMedia.filter(m => m.userId === userId);
 
             console.log("✅ Media updated");
@@ -252,12 +282,10 @@ export const useMediaStore = defineStore("media", () => {
 
             console.log("🗑️ Deleting media:", id);
 
-            // Load all media
             const allMedia = JSON.parse(
                 localStorage.getItem(STORAGE_KEY) || "[]"
             );
 
-            // Find the item
             const mediaItem = allMedia.find(
                 m => m.id === id && m.userId === userId
             );
@@ -277,7 +305,6 @@ export const useMediaStore = defineStore("media", () => {
             const filteredMedia = allMedia.filter(m => m.id !== id);
             localStorage.setItem(STORAGE_KEY, JSON.stringify(filteredMedia));
 
-            // Update state
             mediaItems.value = filteredMedia.filter(m => m.userId === userId);
 
             console.log("✅ Media deleted successfully");
@@ -292,7 +319,76 @@ export const useMediaStore = defineStore("media", () => {
     }
 
     /**
-     * Get media by ID (must belong to current user)
+     * Delete entire album (all items with same albumId)
+     */
+    async function deleteAlbum(albumId) {
+        loading.value = true;
+        error.value = null;
+
+        try {
+            const userId = getCurrentUserId();
+            if (!userId) {
+                throw new Error("User not authenticated");
+            }
+
+            console.log("🗑️ Deleting album:", albumId);
+
+            const allMedia = JSON.parse(
+                localStorage.getItem(STORAGE_KEY) || "[]"
+            );
+
+            // Find all items in this album
+            const albumItems = allMedia.filter(
+                m => m.albumId === albumId && m.userId === userId
+            );
+
+            if (albumItems.length === 0) {
+                throw new Error("Album not found or access denied");
+            }
+
+            console.log(`Found ${albumItems.length} items in album`);
+
+            // Delete all files from storage
+            for (const item of albumItems) {
+                if (item.fileId) {
+                    try {
+                        await deleteFile(item.fileId);
+                        console.log(`✅ Deleted file: ${item.fileId}`);
+                    } catch (error) {
+                        console.error(
+                            `Failed to delete file ${item.fileId}:`,
+                            error
+                        );
+                    }
+                }
+            }
+
+            // Remove all album items from localStorage
+            const filteredMedia = allMedia.filter(m => m.albumId !== albumId);
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(filteredMedia));
+
+            mediaItems.value = filteredMedia.filter(m => m.userId === userId);
+
+            console.log(`✅ Album deleted with ${albumItems.length} items`);
+            return true;
+        } catch (e) {
+            error.value = e.message;
+            console.error("Failed to delete album:", e);
+            throw e;
+        } finally {
+            loading.value = false;
+        }
+    }
+
+    /**
+     * Get album by ID
+     */
+    function getAlbumById(albumId) {
+        return albums.value.find(a => a.albumId === albumId);
+    }
+
+    /**
+     * Get media by ID
      */
     function getMediaById(id) {
         const userId = getCurrentUserId();
@@ -300,17 +396,17 @@ export const useMediaStore = defineStore("media", () => {
     }
 
     /**
-     * Get media by customer ID
+     * Get albums by customer ID
      */
-    function getMediaByCustomer(customerId) {
-        return mediaItems.value.filter(m => m.customerId === customerId);
+    function getAlbumsByCustomer(customerId) {
+        return albums.value.filter(a => a.customerId === customerId);
     }
 
     /**
-     * Get media by order ID
+     * Get albums by order ID
      */
-    function getMediaByOrder(orderId) {
-        return mediaItems.value.filter(m => m.orderId === orderId);
+    function getAlbumsByOrder(orderId) {
+        return albums.value.filter(a => a.orderId === orderId);
     }
 
     /**
@@ -331,7 +427,7 @@ export const useMediaStore = defineStore("media", () => {
     }
 
     /**
-     * Clear all media for current user (useful for debugging)
+     * Clear all media for current user
      */
     function clearUserMedia() {
         const userId = getCurrentUserId();
@@ -347,7 +443,7 @@ export const useMediaStore = defineStore("media", () => {
     }
 
     /**
-     * Migrate old base64 media to Appwrite Storage (one-time operation)
+     * Migrate old base64 media to Appwrite Storage
      */
     async function migrateBase64ToStorage() {
         console.log("🔄 Starting migration...");
@@ -364,13 +460,11 @@ export const useMediaStore = defineStore("media", () => {
         const userMedia = allMedia.filter(m => m.userId === userId);
 
         for (const media of userMedia) {
-            // Skip if already in storage
             if (isStorageUrl(media.url)) {
                 console.log(`⏭️ Skipping ${media.name} - already in storage`);
                 continue;
             }
 
-            // Skip if no valid base64 data
             if (!media.url || !media.url.startsWith("data:")) {
                 console.log(`⏭️ Skipping ${media.name} - no valid data`);
                 continue;
@@ -379,15 +473,12 @@ export const useMediaStore = defineStore("media", () => {
             try {
                 console.log(`📤 Migrating ${media.name}...`);
 
-                // Convert base64 to File
                 const response = await fetch(media.url);
                 const blob = await response.blob();
                 const file = new File([blob], media.name, { type: blob.type });
 
-                // Upload to storage
                 const uploadResult = await uploadMedia(file);
 
-                // Update media item in all media
                 const mediaIndex = allMedia.findIndex(m => m.id === media.id);
                 if (mediaIndex !== -1) {
                     allMedia[mediaIndex] = {
@@ -406,10 +497,7 @@ export const useMediaStore = defineStore("media", () => {
             }
         }
 
-        // Save updated media
         localStorage.setItem(STORAGE_KEY, JSON.stringify(allMedia));
-
-        // Reload user media
         await fetchMedia();
 
         console.log(
@@ -430,6 +518,7 @@ export const useMediaStore = defineStore("media", () => {
 
         // Computed
         totalMedia,
+        albums,
         mediaByCategory,
 
         // Actions
@@ -437,12 +526,15 @@ export const useMediaStore = defineStore("media", () => {
         addMedia,
         updateMedia,
         deleteMedia,
+        deleteAlbum,
+        getAlbumById,
         getMediaById,
-        getMediaByCustomer,
-        getMediaByOrder,
+        getAlbumsByCustomer,
+        getAlbumsByOrder,
         getPreviewUrl,
         isInStorage,
         clearUserMedia,
-        migrateBase64ToStorage
+        migrateBase64ToStorage,
+        generateAlbumId
     };
 });
