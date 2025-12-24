@@ -153,7 +153,8 @@ if (!customer.value) {
           <div v-for="measurement in customerMeasurements" :key="measurement.id" class="p-4 bg-gray-50 rounded-lg">
             <div class="flex items-center justify-between mb-3">
               <h3 class="font-medium text-gray-900">{{ measurement.name }}</h3>
-              <span class="text-xs text-gray-500">{{ formatDate(measurement.createdAt) }}</span>
+              <span class="text-xs text-gray-500">{{ formatDate(new
+              Date(measurement.$createdAt).getTime()) }}</span>
             </div>
             <div class="grid grid-cols-3 gap-2 text-sm">
               <template v-for="(value, key) in getMeasurementValues(measurement)" :key="key">

@@ -79,7 +79,7 @@ if (!order.value) {
         </div>
         <div>
           <p class="text-sm text-gray-500 mb-1">Created</p>
-          <p class="font-medium text-gray-900">{{ formatDate(order.createdAt) }}</p>
+          <p class="font-medium text-gray-900">{{ formatDate(order.$createdAt) }}</p>
         </div>
       </div>
 
